@@ -1,0 +1,8 @@
+{
+  "appId": "com.sa7tein.courier",
+  "appName": "Sa7tein Courier",
+  "webDir": "dist-mobile",
+  "server": {
+    "androidScheme": "https"
+  }
+}

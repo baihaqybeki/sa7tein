@@ -1,0 +1,47 @@
+{
+  "name": "sa7tein",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Sa7tein — monorepo 3 web terpisah ala GoFood: customer, merchant, courier (+ shared package)",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspaces --if-present",
+    "dev:customer": "npm run dev -w @sa7tein/customer",
+    "dev:merchant": "npm run dev -w @sa7tein/merchant",
+    "dev:courier": "npm run dev -w @sa7tein/courier",
+    "dev:cs": "npm run dev -w @sa7tein/cs",
+    "build": "npm run build --workspaces --if-present",
+    "build:customer": "npm run build -w @sa7tein/customer",
+    "build:merchant": "npm run build -w @sa7tein/merchant",
+    "build:courier": "npm run build -w @sa7tein/courier",
+    "build:cs": "npm run build -w @sa7tein/cs",
+    "preview:customer": "npm run preview -w @sa7tein/customer",
+    "preview:merchant": "npm run preview -w @sa7tein/merchant",
+    "preview:courier": "npm run preview -w @sa7tein/courier",
+    "preview:cs": "npm run preview -w @sa7tein/cs",
+    "icons": "/usr/bin/python3 scripts/generate-icons.py",
+    "demo": "npm run build && node scripts/serve-demo.mjs",
+    "seed:supabase": "node scripts/seed-supabase.mjs",
+    "handover": "node scripts/handover.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "apk": "node scripts/build-apk.mjs",
+    "ipa": "node scripts/build-ipa.mjs",
+    "tunnel": "node scripts/tunnel.mjs",
+    "docs": "echo 'Lihat docs/SRS.md dan docs/FSD.md'",
+    "mobile": "npm run build:mobile --workspaces --if-present",
+    "cap:add:android": "npm run cap:add:android --workspaces --if-present",
+    "cap:add:ios": "npm run cap:add:ios --workspaces --if-present",
+    "cap:sync": "npm run cap:sync --workspaces --if-present",
+    "deploy:customer": "node scripts/deploy-vercel.mjs customer",
+    "deploy:merchant": "node scripts/deploy-vercel.mjs merchant",
+    "deploy:courier": "node scripts/deploy-vercel.mjs courier",
+    "deploy:cs": "node scripts/deploy-vercel.mjs cs"
+  },
+  "devDependencies": {
+    "vite": "^5.4.8"
+  }
+}

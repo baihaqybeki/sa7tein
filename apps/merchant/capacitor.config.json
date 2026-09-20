@@ -1,0 +1,8 @@
+{
+  "appId": "com.sa7tein.merchant",
+  "appName": "Sa7tein Merchant",
+  "webDir": "dist-mobile",
+  "server": {
+    "androidScheme": "https"
+  }
+}

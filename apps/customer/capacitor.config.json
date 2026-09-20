@@ -1,0 +1,8 @@
+{
+  "appId": "com.sa7tein.customer",
+  "appName": "Sa7tein Customer",
+  "webDir": "dist-mobile",
+  "server": {
+    "androidScheme": "https"
+  }
+}

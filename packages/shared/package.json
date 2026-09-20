@@ -1,0 +1,14 @@
+{
+  "name": "@sa7tein/shared",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Sa7tein — kode bersama (lib, store, backend, komponen) untuk ketiga web",
+  "main": "./src/lib/store.js",
+  "exports": {
+    "./lib/*": "./src/lib/*",
+    "./data/*": "./src/data/*",
+    "./components/*": "./src/components/*"
+  },
+  "sideEffects": false
+}
