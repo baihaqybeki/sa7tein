@@ -31,10 +31,19 @@ info:
     name: Proprietary
 
 servers:
+  # Backend yang BENAR-BENAR ada sekarang: Supabase PostgREST.
+  # Path di dokumen ini = nama tabel (mis. `/orders` -> `.../rest/v1/orders`).
+  # "Try it out" butuh header `apikey`, dan untuk data non-publik juga
+  # `Authorization: Bearer <access_token>` dari Supabase Auth. Cara mengisinya:
+  # tombol Authorize di atas -> apikey = anon key (Supabase: Settings -> API),
+  # bearer = access_token hasil login. Detail: docs/backend/CONSUME.md.
+  - url: https://dwzxtnfesmpobnepilhl.supabase.co/rest/v1
+    description: LIVE — Supabase PostgREST (butuh apikey; JWT untuk data privat)
+
+  # Rencana, BUKAN host aktif: DNS-nya belum ada sampai gateway REST sendiri
+  # dibangun. Jangan dipakai untuk Try it out (akan gagal "could not resolve host").
   - url: https://api.sa7tein.app
-    description: Produksi (belum dideploy) — host final belum diputuskan
-  - url: http://localhost:8080
-    description: Development lokal (server demo repo backend)
+    description: BELUM DIBANGUN — gateway REST sendiri (host belum diputuskan)
 
 tags:
   - name: Auth
@@ -81,7 +90,10 @@ tags:
     description: Callback dari penyedia pembayaran
 
 security:
+  # PostgREST selalu butuh `apikey`; `bearerAuth` untuk data yang bukan publik.
+  # Ditulis dalam SATU entri = keduanya dikirim Swagger UI saat Try it out.
   - bearerAuth: []
+    apiKeyAuth: []
 
 paths:
   # ---------------------------------------------------------------- AUTH
@@ -1658,6 +1670,13 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+    # Wajib untuk PostgREST. Isi dengan anon key (aman dipublikasikan; RLS yang
+    # membatasi data). JANGAN pernah memakai service role key di sini.
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: apikey
+      description: Anon key project Supabase (Settings → API → anon public)
 
   parameters:
     PathId:
