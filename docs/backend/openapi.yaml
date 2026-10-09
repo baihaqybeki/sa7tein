@@ -1,0 +1,2685 @@
+openapi: 3.1.0
+
+info:
+  title: Sa7tein API — Irbid MVP
+  version: 0.1.0-draft
+  summary: Kontrak REST + Realtime untuk platform pesan-antar Sa7tein (Irbid, Jordan).
+  description: |
+    **Status: DRAFT.** Dibuat lebih awal dari milestone M1 (ERD final) supaya bentuk kontrak
+    bisa ditinjau lebih dulu. Sumber:
+
+    - `za7tein-pwa/docs/product/schema-draft-v1.md` — ERD draft (17 entitas)
+    - `za7tein-pwa/docs/product/prd/decision-irbid-mvp.md` — keputusan PO
+    - `za7tein-pwa/docs/design/flows/INDEX.json` — 24 flow (peta `event → entity`)
+    - Milestone: `docs/backend/MILESTONES.md` (M7)
+
+    Aturan yang mengikat kontrak ini:
+
+    1. **Snapshot > hitung ulang.** Harga, modifier, zone, dan fee di-*freeze* saat order dibuat.
+    2. **Nominal uang = JOD** (display), **IDR = settlement**. Jangan mencampur keduanya dalam
+       satu field; field yang bersifat settlement memakai sufiks `_idr`.
+    3. **`number/pk` auto-increment.** Semua referensi adalah id numerik, bukan nama.
+    4. **`UNRESOLVED` tidak ditebak.** Field/endpoint yang bergantung keputusan PO ditandai
+       `x-unresolved` dan tidak boleh diisi nilai karangan.
+
+    Perubahan apa pun pada kontrak ini wajib disertai pembaruan flow yang relevan di repo
+    `za7tein-pwa` (`docs/design/flows/`), karena flow-lah yang menjadi basis requirement.
+  contact:
+    name: Sa7tein Backend
+    url: https://github.com/baihaqybeki/sa7tein
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.sa7tein.app
+    description: Produksi (belum dideploy) — host final belum diputuskan
+  - url: http://localhost:8080
+    description: Development lokal (server demo repo backend)
+
+tags:
+  - name: Auth
+    description: Registrasi & sesi. Google + nomor WA E.164. **Level 1 tanpa OTP WA.**
+  - name: Me
+    description: Profil pengguna yang sedang login
+  - name: Addresses
+    description: Buku alamat + zona (haversine ke merchant saat pin disimpan)
+  - name: Zones
+    description: Master zona Hijazi/Syimali — milik Super Admin, dibaca semua peran
+  - name: Merchants
+    description: Discovery merchant & profil toko
+  - name: Menus
+    description: Katalog, varian, dan modifier
+  - name: Tenant
+    description: Onboarding merchant, approval, deposit, blacklist COD
+  - name: Orders
+    description: Siklus hidup order (9 status) + snapshot harga/fee/zone
+  - name: Batches
+    description: Batch pengantaran (gabungan order) + timer SLA
+  - name: Couriers
+    description: Kurir milik merchant (maks 3) + lokasi
+  - name: Delivery
+    description: Checkpoint pengiriman, OTP, settlement
+  - name: Wallet
+    description: Wallet, reserve/hold, top-up, cash-out
+  - name: Ledger
+    description: Ledger double-entry append-only (baca saja)
+  - name: Disputes
+    description: Sengketa, resolusi, banding
+  - name: Ratings
+    description: Ulasan merchant & hidangan + balasan
+  - name: Marketing
+    description: Promo dan diskon
+  - name: Chat
+    description: Chat in-app per order (maks 3 peserta)
+  - name: Push
+    description: Langganan Web Push
+  - name: Ops
+    description: Panel CS — monitoring, putusan level-1, blacklist
+  - name: SuperAdmin
+    description: Konsol pemilik platform (non-PWA) — zona, role, pajak, profit, kill switch
+  - name: Webhooks
+    description: Callback dari penyedia pembayaran
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ---------------------------------------------------------------- AUTH
+  /auth/google:
+    post:
+      tags: [Auth]
+      summary: Masuk/dengar dengan Google ID token
+      description: |
+        Membuat akun bila belum ada. Nomor WA tetap **wajib** diisi setelahnya
+        (`POST /auth/phone/verification`). Berlaku untuk customer, merchant, dan kurir.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [idToken]
+              properties:
+                idToken: { type: string }
+                role: { $ref: '#/components/schemas/UserRole' }
+      responses:
+        '200':
+          description: Sesi dibuat
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthSession' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Registrasi manual (nomor WA wajib, format E.164)
+      description: |
+        Format E.164: `+962…` (Jordan) atau `+62…` (Indonesia). Validasi format saja —
+        pengiriman OTP WhatsApp **tidak** dipakai di MVP (Level 1, fallback `wa.me`).
+      security: []
+      x-unresolved: [AUT-1]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, phone, role]
+              properties:
+                name: { type: string, maxLength: 80 }
+                phone: { $ref: '#/components/schemas/PhoneE164' }
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+                role: { $ref: '#/components/schemas/UserRole' }
+      responses:
+        '201':
+          description: Akun dibuat
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthSession' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Masuk dengan email/nomor + password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [identifier, password]
+              properties:
+                identifier:
+                  type: string
+                  description: Email atau nomor E.164
+                password: { type: string }
+                role: { $ref: '#/components/schemas/UserRole' }
+      responses:
+        '200':
+          description: Sesi dibuat
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthSession' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/phone/verification:
+    post:
+      tags: [Auth]
+      summary: Kirim verifikasi nomor WA
+      description: |
+        Level 1: mengembalikan `waLink` (`https://wa.me/<nomor>`) sebagai fallback manual.
+        **Tidak** memakai WhatsApp Business API (Level 2 ditolak di MVP).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone: { $ref: '#/components/schemas/PhoneE164' }
+      responses:
+        '200':
+          description: Instruksi verifikasi
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  waLink: { type: string, format: uri }
+                  expiresAt: { type: string, format: date-time }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /auth/phone/verify:
+    post:
+      tags: [Auth]
+      summary: Konfirmasi nomor WA
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone: { $ref: '#/components/schemas/PhoneE164' }
+                code:
+                  type: string
+                  description: Diisi hanya bila Level 2 diaktifkan kelak
+      responses:
+        '200':
+          description: Nomor terverifikasi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Akhiri sesi
+      responses:
+        '204': { description: Sesi diakhiri }
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Profil sesi aktif
+      responses:
+        '200':
+          description: Pengguna aktif
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ---------------------------------------------------------------- ME
+  /me:
+    get:
+      tags: [Me]
+      summary: Profil saya
+      description: Untuk merchant/kurir, `name`/`address` diturunkan dari record merchant/kurir (satu sumber kebenaran).
+      responses:
+        '200':
+          description: Profil
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+    patch:
+      tags: [Me]
+      summary: Perbarui profil
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, maxLength: 80 }
+                email: { type: string, format: email }
+                phone: { $ref: '#/components/schemas/PhoneE164' }
+      responses:
+        '200':
+          description: Profil diperbarui
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+
+  # ---------------------------------------------------------------- ADDRESSES
+  /me/addresses:
+    get:
+      tags: [Addresses]
+      summary: Daftar alamat saya
+      responses:
+        '200':
+          description: Daftar alamat
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Address' }
+    post:
+      tags: [Addresses]
+      summary: Simpan alamat baru (zone dihitung saat pin disimpan)
+      x-unresolved: [ZON-1]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddressInput' }
+      responses:
+        '201':
+          description: Alamat dibuat
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Address' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /me/addresses/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/PathId' }
+    patch:
+      tags: [Addresses]
+      summary: Perbarui alamat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddressInput' }
+      responses:
+        '200':
+          description: Alamat diperbarui
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Address' }
+    delete:
+      tags: [Addresses]
+      summary: Hapus alamat
+      responses:
+        '204': { description: Terhapus }
+
+  /me/favorites:
+    get:
+      tags: [Merchants]
+      summary: Merchant favorit saya
+      responses:
+        '200':
+          description: Daftar favorit
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/MerchantSummary' }
+    post:
+      tags: [Merchants]
+      summary: Tambahkan merchant ke favorit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [merchantId]
+              properties:
+                merchantId: { type: integer, format: int64 }
+      responses:
+        '201': { description: Ditambahkan }
+
+  /me/favorites/{merchantId}:
+    parameters:
+      - { $ref: '#/components/parameters/PathMerchantId' }
+    delete:
+      tags: [Merchants]
+      summary: Hapus dari favorit
+      responses:
+        '204': { description: Terhapus }
+
+  # ---------------------------------------------------------------- ZONES
+  /zones:
+    get:
+      tags: [Zones]
+      summary: Master zona (Hijazi, Syimali, …)
+      description: Zona didefinisikan Super Admin; merchant hanya mengaktifkan.
+      responses:
+        '200':
+          description: Daftar zona
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Zone' }
+    post:
+      tags: [SuperAdmin]
+      summary: Buat zona (butuh izin `zone.write`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ZoneInput' }
+      responses:
+        '201':
+          description: Zona dibuat
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Zone' }
+
+  /coverage/resolve:
+    post:
+      tags: [Zones]
+      summary: Tentukan zona dari koordinat
+      description: |
+        Dipakai gate checkout & saat menyimpan pin alamat. Bila zona tidak terdeteksi,
+        kembalikan `zone: null` — **jangan** menebak zona terdekat.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [latitude, longitude]
+              properties:
+                latitude: { type: number, format: double }
+                longitude: { type: number, format: double }
+                merchantId: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: Hasil resolusi
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  zone: { oneOf: [{ $ref: '#/components/schemas/ZoneCode' }, { type: 'null' }] }
+                  covered: { type: boolean }
+                  distanceMeters: { type: number }
+                  zoneId: { type: ['integer', 'null'], format: int64 }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  # ---------------------------------------------------------------- MERCHANTS
+  /merchants:
+    get:
+      tags: [Merchants]
+      summary: Discovery merchant
+      description: Customer memilih merchant lebih dulu, baru menu (DEC-1041).
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: Cari nama merchant }
+        - { name: category, in: query, schema: { type: string } }
+        - { name: zoneId, in: query, schema: { type: integer, format: int64 } }
+        - { name: available, in: query, schema: { type: boolean } }
+        - { name: sort, in: query, schema: { type: string, enum: [nearest, rating, newest] } }
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
+      responses:
+        '200':
+          description: Daftar merchant
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/MerchantSummary' }
+                  nextCursor: { type: ['string', 'null'] }
+
+  /merchants/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/PathId' }
+    get:
+      tags: [Merchants]
+      summary: Detail merchant
+      responses:
+        '200':
+          description: Detail merchant
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Merchant' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Merchants]
+      summary: Perbarui profil/toko saya (merchant)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                description: { type: string }
+                photo: { type: string, format: uri }
+                available: { type: boolean }
+                deliveryConfig: { $ref: '#/components/schemas/DeliveryConfig' }
+      responses:
+        '200':
+          description: Diperbarui
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Merchant' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /merchants/{id}/reviews:
+    parameters:
+      - { $ref: '#/components/parameters/PathId' }
+    get:
+      tags: [Ratings]
+      summary: Ulasan merchant
+      x-unresolved: [RATE-2]
+      responses:
+        '200':
+          description: Daftar ulasan
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/RatingReview' }
+
+  /merchants/{id}/couriers:
+    parameters:
+      - { $ref: '#/components/parameters/PathId' }
+    get:
+      tags: [Couriers]
+      summary: Kurir yang dipekerjakan merchant ini
+      description: Maksimum 3 kurir (batas ditegakkan di endpoint mutasi, bukan FK).
+      responses:
+        '200':
+          description: Daftar kurir
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Courier' }
+
+  # ---------------------------------------------------------------- MENUS
+  /merchants/{id}/menus:
+    parameters:
+      - { $ref: '#/components/parameters/PathId' }
+    get:
+      tags: [Menus]
+      summary: Menu merchant
+      responses:
+        '200':
+          description: Daftar menu
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Menu' }
+    post:
+      tags: [Menus]
+      summary: Tambah hidangan (merchant)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MenuInput' }
+      responses:
+        '201':
+          description: Dibuat
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Menu' }
+
+  /menus/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/PathId' }
+    patch:
+      tags: [Menus]
+      summary: Perbarui hidangan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MenuInput' }
+      responses:
+        '200':
+          description: Diperbarui
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Menu' }
+    delete:
+      tags: [Menus]
+      summary: Hapus hidangan
+      responses:
+        '204': { description: Terhapus }
+
+  /menus/{id}/variants:
+    parameters:
+      - { $ref: '#/components/parameters/PathId' }
+    get:
+      tags: [Menus]
+      summary: Varian & modifier hidangan
+      responses:
+        '200':
+          description: Daftar varian
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/MenuVariant' }
+    post:
+      tags: [Menus]
+      summary: Tambah varian
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MenuVariantInput' }
+      responses:
+        '201':
+          description: Dibuat
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MenuVariant' }
+
+  # ---------------------------------------------------------------- TENANT
+  /tenant/onboarding:
+    post:
+      tags: [Tenant]
+      summary: Kirim pendaftaran tenant (merchant)
+      description: Membuat merchant berstatus `pending`. Menunggu approval CS.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [storeName, storePhone, deliveryConfig]
+              properties:
+                storeName: { type: string }
+                storePhone: { $ref: '#/components/schemas/PhoneE164' }
+                storeAddress: { type: string }
+                deliveryConfig: { $ref: '#/components/schemas/DeliveryConfig' }
+      responses:
+        '201':
+          description: Terkirim
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Merchant' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /admin/tenants:
+    get:
+      tags: [Ops]
+      summary: Antrean approval tenant (CS)
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [pending, approved, suspended, blacklisted] } }
+      responses:
+        '200':
+          description: Antrean
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Merchant' }
+
+  /admin/tenants/{id}/approve:
+    post:
+      tags: [Ops]
+      summary: Setujui tenant (CS)
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+      responses:
+        '200':
+          description: Disetujui
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Merchant' }
+
+  /admin/tenants/{id}/deposit:
+    post:
+      tags: [Ops]
+      summary: Verifikasi deposit COD (CS)
+      description: Deposit COD 3,50 JOD. Approval deposit = kerja operasi CS.
+      x-unresolved: [FEE-1]
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [depositStatus]
+              properties:
+                depositStatus: { type: string, enum: [unpaid, held, released] }
+                amountJod: { type: number, description: Nominal sesuai keputusan PO, bukan hardcode }
+      responses:
+        '200':
+          description: Deposit diperbarui
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Merchant' }
+
+  /admin/tenants/{id}/blacklist:
+    post:
+      tags: [Ops]
+      summary: Blacklist COD (merchant + riskFlag customer)
+      description: |
+        Menandai dua sisi sekaligus: merchant `blacklisted` **dan** customer `riskFlag`.
+        Pencabutan harus menyentuh keduanya. Super Admin **tidak** punya tombol ini.
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target]
+              properties:
+                target: { type: string, enum: [merchant, customer] }
+                reason: { type: string }
+                customerId: { type: integer, format: int64 }
+      responses:
+        '200': { description: Diterapkan }
+
+  # ---------------------------------------------------------------- ORDERS
+  /orders:
+    get:
+      tags: [Orders]
+      summary: Daftar order (ter-scope per peran)
+      description: |
+        customer → order miliknya; merchant → order di tokonya; kurir → order yang
+        ditugaskan; cs → semua merchant; superadmin → semua.
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [cart, quotation, canceled, prepare, waitingCourier, waitingDelivery, delivery, done] } }
+        - { name: merchantId, in: query, schema: { type: integer, format: int64 } }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - { name: q, in: query, schema: { type: string }, description: Cari kode order / nama }
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
+      responses:
+        '200':
+          description: Daftar order
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Order' }
+                  nextCursor: { type: ['string', 'null'] }
+    post:
+      tags: [Orders]
+      summary: Buat order dari keranjang
+      description: |
+        Efek samping: (1) snapshot harga/modifier/zone/fee, (2) membuat **reserve** di wallet
+        (`wallet_holds` → `reserved`), saldo belum berkurang. Saldo berkurang saat order `done`.
+        Kirim `Idempotency-Key` — operasi ini memindahkan uang.
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      x-unresolved: [OST-1, RSV-1]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OrderInput' }
+      responses:
+        '201':
+          description: Order dibuat
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /orders/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/PathId' }
+    get:
+      tags: [Orders]
+      summary: Detail order
+      responses:
+        '200':
+          description: Order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /orders/{id}/cancel:
+    post:
+      tags: [Orders]
+      summary: Batalkan order
+      description: Sebelum `done`, pembatalan hanya **melepas reserve** (`released`) — tidak ada potongan yang perlu di-reverse.
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cancelBy]
+              properties:
+                cancelBy: { type: string, enum: [customer, merchant, system] }
+                reason: { type: string }
+      responses:
+        '200':
+          description: Dibatalkan
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+
+  /orders/{id}/accept:
+    post:
+      tags: [Orders]
+      summary: Terima order (merchant)
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+      responses:
+        '200':
+          description: Diterima
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+
+  /orders/{id}/reject:
+    post:
+      tags: [Orders]
+      summary: Tolak order (merchant)
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        '200':
+          description: Ditolak
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+
+  /orders/{id}/prepare:
+    post:
+      tags: [Orders]
+      summary: Mulai masak (menyalakan timer SLA prepare)
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+      x-unresolved: [SLA-1]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [prepTimeMinutes]
+              properties:
+                prepTimeMinutes: { type: integer, description: Pilihan 15/25/35 menit }
+      responses:
+        '200':
+          description: Mulai disiapkan
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+
+  /orders/{id}/ready:
+    post:
+      tags: [Orders]
+      summary: Order siap → cari kurir
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+      responses:
+        '200':
+          description: Siap
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+
+  /orders/{id}/courier/assign:
+    post:
+      tags: [Delivery]
+      summary: Tugaskan kurir (merchant memilih kurir sendiri)
+      description: Rekrutmen kurir adalah tanggung jawab merchant (maks 3 kurir per merchant).
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [courierId]
+              properties:
+                courierId: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: Kurir ditugaskan
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+
+  /orders/{id}/courier/accept:
+    post:
+      tags: [Delivery]
+      summary: Kurir menerima (atomic claim — anti double-claim)
+      description: |
+        Operasi compare-and-swap: hanya **satu** kurir yang menang bila beberapa menekan
+        bersamaan. Yang kalah menerima `409 ORDER_ALREADY_TAKEN`.
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+      responses:
+        '200':
+          description: Diterima
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        '409':
+          description: Sudah diambil kurir lain
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /orders/{id}/courier/reject:
+    post:
+      tags: [Delivery]
+      summary: Kurir menolak order
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+      responses:
+        '200':
+          description: Ditolak, order kembali mencari kurir
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+
+  /orders/{id}/checkpoints:
+    post:
+      tags: [Delivery]
+      summary: Catat checkpoint pengiriman
+      description: 4 titik verifikasi (mis. di toko, tiba, OTP, selesai). Menyalakan/hentikan timer SLA terkait.
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+      x-unresolved: [SLA-1]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CheckpointInput' }
+      responses:
+        '201':
+          description: Tercatat
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Checkpoint' }
+
+  /orders/{id}/otp/verify:
+    post:
+      tags: [Delivery]
+      summary: Verifikasi OTP serah-terima → settle
+      description: |
+        Menutup delivery: reserve `reserved` → `settled`, saldo wallet berkurang di titik ini,
+        dan entry ledger `order`/`delivery` dibuat.
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, description: OTP 4 digit }
+      responses:
+        '200':
+          description: Selesai
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /orders/{id}/review:
+    post:
+      tags: [Ratings]
+      summary: Kirim ulasan (merchant dan/atau hidangan)
+      description: Tepat satu dari `merchantId`/`menuId` harus terisi.
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+      x-unresolved: [RATE-1]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rating]
+              properties:
+                rating: { type: integer, minimum: 1, maximum: 5 }
+                review: { type: string, maxLength: 500 }
+                menuId: { type: integer, format: int64 }
+      responses:
+        '201':
+          description: Tersimpan
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RatingReview' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  # ---------------------------------------------------------------- BATCHES
+  /batches:
+    get:
+      tags: [Batches]
+      summary: Daftar batch
+      parameters:
+        - { name: merchantId, in: query, schema: { type: integer, format: int64 } }
+        - { name: status, in: query, schema: { type: string, enum: [prepare, closed, waitingCourier, waitingDelivery, delivery] } }
+      responses:
+        '200':
+          description: Daftar batch
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Batch' }
+    post:
+      tags: [Batches]
+      summary: Buat batch (merchant mengelompokkan order)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [merchantId, orderIds]
+              properties:
+                merchantId: { type: integer, format: int64 }
+                courierId: { type: integer, format: int64 }
+                orderIds:
+                  type: array
+                  items: { type: integer, format: int64 }
+      responses:
+        '201':
+          description: Batch dibuat
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Batch' }
+
+  # ---------------------------------------------------------------- COURIERS
+  /couriers/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/PathId' }
+    patch:
+      tags: [Couriers]
+      summary: Perbarui kurir (ketersediaan, foto, kendaraan)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                availability: { type: string, enum: [available, unavailable, busy] }
+                photo: { type: string, format: uri }
+                vehicle: { type: string }
+      responses:
+        '200':
+          description: Diperbarui
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Courier' }
+
+  /couriers/{id}/location:
+    post:
+      tags: [Couriers]
+      summary: Kirim lokasi kurir (live tracking)
+      description: Bila `poin` tidak dikirim, server boleh memakai GPS perangkat (Capacitor).
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [latitude, longitude]
+              properties:
+                latitude: { type: number, format: double }
+                longitude: { type: number, format: double }
+                accuracyMeters: { type: number }
+      responses:
+        '202': { description: Diterima }
+
+  # ---------------------------------------------------------------- WALLET
+  /wallet:
+    get:
+      tags: [Wallet]
+      summary: Wallet saya
+      responses:
+        '200':
+          description: Wallet
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Wallet' }
+
+  /wallet/holds:
+    get:
+      tags: [Wallet]
+      summary: Reserve/hold aktif
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [none, reserved, settled, released] } }
+      responses:
+        '200':
+          description: Daftar hold
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/WalletHold' }
+
+  /wallet/topups:
+    post:
+      tags: [Wallet]
+      summary: Buat top-up (VA / QRIS via Xendit)
+      description: Mengembalikan instruksi pembayaran. Status awal `pending`; berubah lewat webhook.
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      x-unresolved: [FX-1]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amountJod, method]
+              properties:
+                amountJod: { type: number, minimum: 0 }
+                method: { type: string, enum: [xendit_va, xendit_qris, transfer] }
+      responses:
+        '201':
+          description: Top-up dibuat
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TopUp' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /wallet/topups/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/PathId' }
+    get:
+      tags: [Wallet]
+      summary: Status top-up
+      responses:
+        '200':
+          description: Top-up
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TopUp' }
+
+  /wallet/cashouts:
+    post:
+      tags: [Wallet]
+      summary: Ajukan cash-out
+      description: Saldo di-hold saat permintaan dibuat. Fee cash-out belum diputuskan PO — jangan hardcode.
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      x-unresolved: [CO-1]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amountJod]
+              properties:
+                amountJod: { type: number, minimum: 0 }
+                destination: { type: string }
+      responses:
+        '201':
+          description: Diajukan
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CashOut' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  # ---------------------------------------------------------------- LEDGER
+  /ledger:
+    get:
+      tags: [Ledger]
+      summary: Ledger saya (baca saja)
+      parameters:
+        - { name: reference, in: query, schema: { type: string, enum: [topUp, order, delivery, withdrawal, refund, hold, release] } }
+        - { name: type, in: query, schema: { type: string, enum: [cr, db] } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
+      responses:
+        '200':
+          description: Entry ledger
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/LedgerEntry' }
+                  nextCursor: { type: ['string', 'null'] }
+
+  # ---------------------------------------------------------------- DISPUTES
+  /disputes:
+    post:
+      tags: [Disputes]
+      summary: Buka sengketa
+      x-unresolved: [DSP-1]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orderId, type]
+              properties:
+                orderId: { type: integer, format: int64 }
+                type: { type: string, enum: [late, missing, wrong, not_delivered, payment_failed] }
+                note: { type: string }
+      responses:
+        '201':
+          description: Sengketa dibuka
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Dispute' }
+    get:
+      tags: [Ops]
+      summary: Daftar sengketa (CS)
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [open, investigating, resolved, rejected] } }
+      responses:
+        '200':
+          description: Daftar sengketa
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Dispute' }
+
+  /disputes/{id}/resolve:
+    post:
+      tags: [Ops]
+      summary: Putusan sengketa level-1 (CS)
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      x-unresolved: [DSP-1]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resolution]
+              properties:
+                resolution: { type: string, enum: [refund_customer, refund_order, resettle, no_action] }
+                refundAmountJod: { type: number }
+                note: { type: string }
+      responses:
+        '200':
+          description: Diputuskan
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Dispute' }
+
+  /disputes/{id}/appeals:
+    post:
+      tags: [SuperAdmin]
+      summary: Ajukan banding ke Super Admin
+      description: Cakupan banding (siapa yang boleh mengajukan, window/SLA) belum diputuskan.
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+      x-unresolved: [APL-1]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        '201': { description: Banding diajukan }
+
+  # ---------------------------------------------------------------- RATINGS
+  /reviews/{id}/reply:
+    post:
+      tags: [Ratings]
+      summary: Balas ulasan (merchant)
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+      x-unresolved: [RATE-2]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string, maxLength: 500 }
+      responses:
+        '201':
+          description: Balasan tersimpan
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReviewReply' }
+
+  # ---------------------------------------------------------------- MARKETING
+  /promos:
+    get:
+      tags: [Marketing]
+      summary: Daftar promo aktif
+      x-unresolved: [MKT-1]
+      responses:
+        '200':
+          description: Daftar promo
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Marketing' }
+    post:
+      tags: [Marketing]
+      summary: Buat promo
+      x-unresolved: [MKT-1]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MarketingInput' }
+      responses:
+        '201':
+          description: Dibuat
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Marketing' }
+
+  /promos/validate:
+    post:
+      tags: [Marketing]
+      summary: Validasi kode promo untuk sebuah order
+      x-unresolved: [MKT-1]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+                merchantId: { type: integer, format: int64 }
+                subTotalJod: { type: number }
+      responses:
+        '200':
+          description: Hasil validasi
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid: { type: boolean }
+                  promoAmountJod: { type: number }
+                  reason: { type: string }
+
+  # ---------------------------------------------------------------- CHAT
+  /orders/{id}/chat:
+    parameters:
+      - { $ref: '#/components/parameters/PathId' }
+    get:
+      tags: [Chat]
+      summary: Ambil thread chat order
+      description: Satu thread per order, maksimum 3 peserta (customer, merchant, kurir).
+      x-unresolved: [CHAT-1]
+      responses:
+        '200':
+          description: Thread dan pesan
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChatThread' }
+
+  /orders/{id}/chat/messages:
+    parameters:
+      - { $ref: '#/components/parameters/PathId' }
+    post:
+      tags: [Chat]
+      summary: Kirim pesan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string, maxLength: 2000 }
+                channel:
+                  type: string
+                  enum: [customer-merchant, merchant-courier, courier-customer]
+                  description: Bila kosong, server memilih kanal sesuai peran
+      responses:
+        '201':
+          description: Terkirim
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChatMessage' }
+
+  # ---------------------------------------------------------------- PUSH
+  /push/subscriptions:
+    post:
+      tags: [Push]
+      summary: Daftarkan langganan Web Push
+      description: Fallback ke `wa.me` bila penerima tidak punya langganan aktif.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint, keys]
+              properties:
+                endpoint: { type: string, format: uri }
+                keys:
+                  type: object
+                  required: [p256dh, auth]
+                  properties:
+                    p256dh: { type: string }
+                    auth: { type: string }
+      responses:
+        '201': { description: Terdaftar }
+    delete:
+      tags: [Push]
+      summary: Hapus langganan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint]
+              properties:
+                endpoint: { type: string, format: uri }
+      responses:
+        '204': { description: Terhapus }
+
+  # ---------------------------------------------------------------- OPS
+  /admin/orders:
+    get:
+      tags: [Ops]
+      summary: Semua order lintas merchant (CS)
+      parameters:
+        - { name: status, in: query, schema: { type: string } }
+        - { name: needsAttention, in: query, schema: { type: boolean }, description: Order menunggak / SLA breach }
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
+      responses:
+        '200':
+          description: Daftar order
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Order' }
+                  nextCursor: { type: ['string', 'null'] }
+
+  /admin/orders/{id}/cancel:
+    post:
+      tags: [Ops]
+      summary: Batalkan order (CS)
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        '200':
+          description: Dibatalkan
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+
+  /admin/liability:
+    get:
+      tags: [Ops]
+      summary: Ringkasan kewajiban platform
+      description: |
+        Kewajiban = saldo wallet customer + merchant + tips kurir.
+        Ini **bukan** gaji kurir. Dana ini tidak boleh dihitung sebagai milik platform.
+      responses:
+        '200':
+          description: Kewajiban
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LiabilitySummary' }
+
+  /admin/audit:
+    get:
+      tags: [Ops]
+      summary: Audit trail aksi CS
+      parameters:
+        - { name: actorId, in: query, schema: { type: integer, format: int64 } }
+        - { $ref: '#/components/parameters/PageLimit' }
+      x-unresolved: [AUD-1]
+      responses:
+        '200':
+          description: Audit
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AuditEntry' }
+
+  # ---------------------------------------------------------------- SUPER ADMIN
+  /superadmin/users:
+    get:
+      tags: [SuperAdmin]
+      summary: Registri pengguna (read-only)
+      parameters:
+        - { name: role, in: query, schema: { $ref: '#/components/schemas/UserRole' } }
+        - { name: q, in: query, schema: { type: string } }
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
+      responses:
+        '200':
+          description: Registri
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/UserRecord' }
+
+  /superadmin/users/merchant/{id}:
+    get:
+      tags: [SuperAdmin]
+      summary: Dossier merchant
+      description: Identitas usaha, keadaan tenant, kurir yang dipekerjakan, sengketa, ledger, alert SLA.
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+      responses:
+        '200':
+          description: Dossier
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MerchantDossier' }
+
+  /superadmin/tenants/{id}/status:
+    patch:
+      tags: [SuperAdmin]
+      summary: Ubah status tenant (izin `tenant.status`)
+      description: |
+        Suspend dan aktifkan kembali. **Bukan** approval onboarding, dan **bukan** blacklist COD
+        (keduanya milik CS). Hanya menerima `active`/`suspended`; `blacklisted` ditolak.
+      parameters:
+        - { $ref: '#/components/parameters/PathId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenantStatus]
+              properties:
+                tenantStatus: { type: string, enum: [approved, suspended] }
+      responses:
+        '200':
+          description: Diperbarui
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Merchant' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /superadmin/tax-reports:
+    get:
+      tags: [SuperAdmin]
+      summary: Laporan pajak aplikasi
+      description: GST makanan + pajak atas fee platform. Tarif final dan format ekspor belum diputuskan.
+      parameters:
+        - { name: period, in: query, required: true, schema: { type: string, pattern: '^\\d{4}-\\d{2}$' } }
+      x-unresolved: [TAX-1, TAX-2]
+      responses:
+        '200':
+          description: Laporan
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaxReport' }
+
+  /superadmin/platform-profit:
+    get:
+      tags: [SuperAdmin]
+      summary: Saldo keuntungan platform
+      description: Fee platform dikurangi biaya. Ini satu-satunya dana yang boleh ditarik SA sebagai pemegang platform.
+      responses:
+        '200':
+          description: Saldo
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlatformProfit' }
+
+  /superadmin/switches:
+    get:
+      tags: [SuperAdmin]
+      summary: Keadaan kill switch / mode maintenance
+      responses:
+        '200':
+          description: Keadaan switch
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PlatformSwitch' }
+    patch:
+      tags: [SuperAdmin]
+      summary: Ubah kill switch (mis. hentikan COD, hentikan payout, maintenance)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, enabled]
+              properties:
+                key: { type: string, enum: [cod_enabled, payout_enabled, maintenance_mode] }
+                enabled: { type: boolean }
+      responses:
+        '200':
+          description: Diubah
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlatformSwitch' }
+
+  # ---------------------------------------------------------------- WEBHOOKS
+  /webhooks/xendit:
+    post:
+      tags: [Webhooks]
+      summary: Callback Xendit (VA / QRIS)
+      description: |
+        Wajib idempoten: provider dapat mengirim ulang callback. Verifikasi tanda tangan,
+        simpan `event id` yang sudah diproses, dan **jangan** memproses ulang.
+        Urutan callback tidak dijamin — jangan menganggap `paid` selalu datang terakhir.
+      security: []
+      x-unresolved: [WEB-1]
+      parameters:
+        - { name: x-callback-token, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200': { description: Diterima }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    PathId:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+    PathMerchantId:
+      name: merchantId
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+    PageLimit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    PageCursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Wajib untuk operasi yang memindahkan uang (buat order, top-up, cash-out, settle,
+        putusan sengketa). Request dengan kunci sama mengembalikan hasil yang sama.
+      schema: { type: string, maxLength: 64 }
+
+  responses:
+    Unauthorized:
+      description: Tidak terautentikasi
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Tidak punya izin untuk peran ini
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Tidak ditemukan
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: Konflik state (mis. order sudah diambil kurir lain)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    UnprocessableEntity:
+      description: Validasi gagal
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    PhoneE164:
+      type: string
+      pattern: '^\+[1-9]\d{7,14}$'
+      description: Nomor E.164 (+962 Jordan, +62 Indonesia). Validasi format saja di MVP.
+      example: '+962790000000'
+
+    UserRole:
+      type: string
+      enum: [customer, merchant, courier, cs, superadmin]
+
+    ZoneCode:
+      type: string
+      description: Kode zona master (mis. Hijazi, Syimali). Daftar final ditentukan Super Admin.
+      example: Hijazi
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Kode mesin (mis. ORDER_ALREADY_TAKEN, INSUFFICIENT_BALANCE)
+          example: ORDER_ALREADY_TAKEN
+        message: { type: string }
+        details: { type: object, additionalProperties: true }
+        requestId: { type: string }
+
+    User:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        type: { $ref: '#/components/schemas/UserRole' }
+        email: { type: ['string', 'null'], format: email }
+        phone: { $ref: '#/components/schemas/PhoneE164' }
+        verified: { type: boolean }
+        status: { type: string, enum: [active, suspended] }
+        name: { type: string, description: Diturunkan dari record merchant/kurir bila ada }
+        role: { $ref: '#/components/schemas/UserRole' }
+        merchantId: { type: ['integer', 'null'], format: int64 }
+        courierId: { type: ['integer', 'null'], format: int64 }
+
+    UserRecord:
+      type: object
+      description: Baris registri pengguna di konsol Super Admin (read-only).
+      properties:
+        id: { type: integer, format: int64 }
+        role: { $ref: '#/components/schemas/UserRole' }
+        name: { type: string }
+        phone: { $ref: '#/components/schemas/PhoneE164' }
+        verified: { type: boolean }
+        status: { type: string, enum: [active, suspended] }
+        createdAt: { type: string, format: date-time }
+        merchantId: { type: ['integer', 'null'], format: int64 }
+
+    AuthSession:
+      type: object
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        expiresIn: { type: integer }
+        user: { $ref: '#/components/schemas/User' }
+
+    AddressInput:
+      type: object
+      required: [label, address, latitude, longitude]
+      properties:
+        label: { type: string, example: Rumah }
+        address: { type: string }
+        latitude: { type: number, format: double }
+        longitude: { type: number, format: double }
+        isDefault: { type: boolean }
+
+    Address:
+      allOf:
+        - $ref: '#/components/schemas/AddressInput'
+        - type: object
+          properties:
+            id: { type: integer, format: int64 }
+            userId: { type: integer, format: int64 }
+            zone: { oneOf: [{ $ref: '#/components/schemas/ZoneCode' }, { type: 'null' }] }
+            x-unresolved: [ZON-1]
+            description: Zone dihitung dari haversine ke merchant saat pin disimpan.
+
+    DeliveryConfig:
+      type: object
+      description: Fee dapat dihitung per radius (tier jarak) atau per area (zona).
+      required: [mode]
+      properties:
+        mode: { type: string, enum: [radius, area] }
+        radiusMeters: { type: ['integer', 'null'] }
+        feeByDistance:
+          type: ['array', 'null']
+          items:
+            type: object
+            properties:
+              baseJod: { type: number }
+              perKmJod: { type: number }
+        feeByArea:
+          type: ['array', 'null']
+          items:
+            type: object
+            properties:
+              zone: { $ref: '#/components/schemas/ZoneCode' }
+              feeJod: { type: number }
+        activeZones:
+          type: array
+          description: Merchant hanya mengaktifkan zona master; tidak mendefinisikannya.
+          items: { $ref: '#/components/schemas/ZoneCode' }
+
+    ZoneInput:
+      type: object
+      required: [code, name]
+      properties:
+        code: { $ref: '#/components/schemas/ZoneCode' }
+        name: { type: string }
+        polygon: { type: array, items: { type: array, items: { type: number } } }
+
+    Zone:
+      allOf:
+        - $ref: '#/components/schemas/ZoneInput'
+        - type: object
+          properties:
+            id: { type: integer, format: int64 }
+            createdAt: { type: string, format: date-time }
+
+    MerchantSummary:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        photo: { type: ['string', 'null'], format: uri }
+        description: { type: ['string', 'null'] }
+        available: { type: boolean }
+        ratingAvg: { type: ['number', 'null'], description: Angka turunan dari ulasan }
+        distanceMeters: { type: ['number', 'null'] }
+        deliveryFeeFromJod: { type: ['number', 'null'] }
+
+    Merchant:
+      allOf:
+        - $ref: '#/components/schemas/MerchantSummary'
+        - type: object
+          properties:
+            userId: { type: integer, format: int64 }
+            deliveryConfig: { $ref: '#/components/schemas/DeliveryConfig' }
+            tenantStatus: { type: string, enum: [pending, approved, suspended, blacklisted] }
+            depositJod: { type: number, description: "Deposit COD (keputusan PO: 3,50 JOD)" }
+            depositStatus: { type: string, enum: [unpaid, held, released] }
+            creditJod:
+              type: number
+              description: Modal/kredit founding (5 JOD) + cashback. Non-withdrawal.
+
+    MerchantDossier:
+      type: object
+      properties:
+        merchant: { $ref: '#/components/schemas/Merchant' }
+        couriers:
+          type: array
+          items: { $ref: '#/components/schemas/Courier' }
+        disputes:
+          type: array
+          items: { $ref: '#/components/schemas/Dispute' }
+        ledger:
+          type: array
+          items: { $ref: '#/components/schemas/LedgerEntry' }
+        slaAlerts:
+          type: array
+          items:
+            type: object
+            properties:
+              batchId: { type: integer, format: int64 }
+              kind: { type: string, enum: [prepare, delivery] }
+              deadline: { type: ['string', 'null'], format: date-time }
+
+    Courier:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        userId: { type: integer, format: int64 }
+        merchantId: { type: integer, format: int64, description: Kurir adalah karyawan merchant (maks 3) }
+        availability: { type: string, enum: [available, unavailable, busy] }
+        latitude: { type: ['number', 'null'], format: double }
+        longitude: { type: ['number', 'null'], format: double }
+        photo: { type: ['string', 'null'], format: uri }
+        vehicle: { type: ['string', 'null'] }
+
+    MenuInput:
+      type: object
+      required: [name, priceJod]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        priceJod: { type: number }
+        available: { type: boolean }
+        image: { type: ['string', 'null'], format: uri }
+        stock: { type: integer }
+
+    Menu:
+      allOf:
+        - $ref: '#/components/schemas/MenuInput'
+        - type: object
+          properties:
+            id: { type: integer, format: int64 }
+            merchantId: { type: integer, format: int64 }
+            variants:
+              type: array
+              items: { $ref: '#/components/schemas/MenuVariant' }
+
+    MenuVariantInput:
+      type: object
+      required: [name, maxSelect, options]
+      properties:
+        name: { type: string, example: Ukuran }
+        required: { type: boolean, description: 'true = wajib dipilih (mis. ukuran)' }
+        maxSelect: { type: integer, minimum: 1, description: 1 = radio, N = checkbox }
+        options:
+          type: array
+          items:
+            type: object
+            required: [name]
+            properties:
+              name: { type: string }
+              priceDeltaJod: { type: number, description: Boleh negatif }
+
+    MenuVariant:
+      allOf:
+        - $ref: '#/components/schemas/MenuVariantInput'
+        - type: object
+          properties:
+            id: { type: integer, format: int64 }
+            menuId: { type: integer, format: int64 }
+
+    OrderInput:
+      type: object
+      required: [merchantId, deliveryAddressId, items, paymentMethod]
+      properties:
+        merchantId: { type: integer, format: int64 }
+        deliveryAddressId: { type: integer, format: int64 }
+        items:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [menuId, qty]
+            properties:
+              menuId: { type: integer, format: int64 }
+              qty: { type: integer, minimum: 1 }
+              modifiers:
+                type: array
+                items:
+                  type: object
+                  required: [variantId, optionId]
+                  properties:
+                    variantId: { type: integer, format: int64 }
+                    optionId: { type: integer, format: int64 }
+              note: { type: ['string', 'null'], example: tanpa bawang }
+        paymentMethod: { type: string, enum: [cod, transfer, xendit_va, xendit_qris] }
+        promoCode: { type: ['string', 'null'] }
+        tipJod: { type: number, default: 0 }
+        orderNote: { type: ['string', 'null'] }
+
+    OrderItem:
+      type: object
+      description: Semua nominal adalah **snapshot** saat order dibuat, bukan hasil hitung ulang.
+      properties:
+        id: { type: integer, format: int64 }
+        orderId: { type: integer, format: int64, description: 'FK ke order (entitas draft: order)' }
+        menuId: { type: integer, format: int64 }
+        name: { type: string, description: Snapshot nama hidangan }
+        qty: { type: integer }
+        unitPriceJod: { type: number }
+        modifiers:
+          type: array
+          items:
+            type: object
+            properties:
+              variantId: { type: integer, format: int64 }
+              optionId: { type: integer, format: int64 }
+              name: { type: string }
+              priceDeltaJod: { type: number }
+        lineTotalJod: { type: number }
+        note: { type: ['string', 'null'] }
+
+    Order:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        code: { type: string, example: SA-1041, description: Satu kode dipakai di 4 peran }
+        status:
+          type: string
+          enum: [cart, quotation, canceled, prepare, waitingCourier, waitingDelivery, delivery, done]
+          x-unresolved: [OST-1]
+        customerId: { type: integer, format: int64 }
+        merchantId: { type: integer, format: int64 }
+        deliveryAddressId: { type: integer, format: int64 }
+        batchId: { type: ['integer', 'null'], format: int64 }
+        courierId: { type: ['integer', 'null'], format: int64 }
+        subTotalJod: { type: number }
+        deliveryFeeJod: { type: number, description: Snapshot tarif }
+        platformFeeJod: { type: number, description: Snapshot; nilai final UNRESOLVED (FEE-1) }
+        tipJod: { type: number }
+        promoId: { type: ['integer', 'null'], format: int64, description: 'FK ke marketing; null bila tanpa promo' }
+        promoAmountJod: { type: number }
+        totalJod: { type: number }
+        zone: { $ref: '#/components/schemas/ZoneCode' }
+        paymentMethod: { type: string, enum: [cod, transfer, xendit_va, xendit_qris] }
+        paymentStatus: { type: string, enum: [unpaid, pending, paid, failed, refunded] }
+        holdStatus:
+          type: string
+          enum: [none, reserved, settled, released]
+          description: Tahap `cut` dihapus — saldo baru berkurang saat order `done`.
+        paidAt: { type: ['string', 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+        placedAt: { type: ['string', 'null'], format: date-time }
+        cancelReason: { type: ['string', 'null'] }
+        cancelBy: { type: ['string', 'null'], enum: [customer, merchant, system, null] }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/OrderItem' }
+
+    Batch:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        merchantId: { type: integer, format: int64 }
+        courierId: { type: ['integer', 'null'], format: int64 }
+        status: { type: string, enum: [prepare, closed, waitingCourier, waitingDelivery, delivery] }
+        etaPrepareSeconds: { type: ['integer', 'null'] }
+        etaDeliverySeconds: { type: ['integer', 'null'] }
+        slaPrepareDeadline: { type: ['string', 'null'], format: date-time, description: Angka SLA belum final (SLA-1) }
+        slaDeliveryDeadline: { type: ['string', 'null'], format: date-time }
+        escalatedToAdmin: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        x-unresolved: [SLA-1]
+
+    CheckpointInput:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string, enum: [at_store, picked_up, arrived, otp_verified] }
+        latitude: { type: number, format: double }
+        longitude: { type: number, format: double }
+        proofPhoto: { type: ['string', 'null'], format: uri }
+        note: { type: ['string', 'null'] }
+
+    Checkpoint:
+      allOf:
+        - $ref: '#/components/schemas/CheckpointInput'
+        - type: object
+          properties:
+            id: { type: integer, format: int64 }
+            orderId: { type: integer, format: int64 }
+            at: { type: string, format: date-time }
+
+    Wallet:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        userId: { type: integer, format: int64 }
+        balanceJod: { type: number }
+        reservedBalanceJod: { type: number, description: Terkunci oleh COD hold + payout in-flight }
+
+    WalletHold:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        walletId: { type: integer, format: int64 }
+        orderId: { type: integer, format: int64 }
+        status: { type: string, enum: [none, reserved, settled, released] }
+        amountJod: { type: number }
+        createdAt: { type: string, format: date-time }
+        settledAt: { type: ['string', 'null'], format: date-time }
+
+    TopUp:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        walletId: { type: integer, format: int64 }
+        amountJod: { type: number }
+        amountIdr: { type: ['number', 'null'], description: Nilai settlement }
+        method: { type: string, enum: [xendit_va, xendit_qris, transfer] }
+        status: { type: string, enum: [pending, paid, expired, failed] }
+        paymentInstructions: { type: ['object', 'null'], additionalProperties: true }
+        expiresAt: { type: ['string', 'null'], format: date-time, description: Masa berlaku VA belum diputuskan (WEB-1) }
+        createdAt: { type: string, format: date-time }
+
+    CashOut:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        walletId: { type: integer, format: int64 }
+        amountJod: { type: number }
+        feeJod: { type: ['number', 'null'], description: Fee cash-out belum diputuskan (CO-1) }
+        status: { type: string, enum: [requested, processing, paid, rejected] }
+        destination: { type: ['string', 'null'] }
+        createdAt: { type: string, format: date-time }
+        x-unresolved: [CO-1]
+
+    LedgerEntry:
+      type: object
+      description: Append-only. Tidak ada update/delete pada tabel ini.
+      properties:
+        id: { type: integer, format: int64 }
+        userId: { type: integer, format: int64 }
+        type: { type: string, enum: [cr, db] }
+        reference: { type: string, enum: [topUp, order, delivery, withdrawal, refund, hold, release] }
+        amountJod: { type: number }
+        orderId: { type: ['integer', 'null'], format: int64 }
+        createdAt: { type: string, format: date-time }
+
+    Dispute:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        orderId: { type: integer, format: int64 }
+        openedBy: { type: integer, format: int64, description: Referensi id pengguna, bukan nama }
+        type: { type: string, enum: [late, missing, wrong, not_delivered, payment_failed] }
+        status: { type: string, enum: [open, investigating, resolved, rejected] }
+        resolution: { type: ['string', 'null'], enum: [refund_customer, refund_order, resettle, no_action, null] }
+        refundAmountJod: { type: ['number', 'null'] }
+        resolvedBy: { type: ['integer', 'null'], format: int64 }
+        resolvedAt: { type: ['string', 'null'], format: date-time }
+        windowClosesAt: { type: ['string', 'null'], format: date-time, description: Window 24 jam bersifat sementara (DSP-1) }
+        x-unresolved: [DSP-1]
+
+    RatingReview:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        orderId: { type: integer, format: int64 }
+        customerId: { type: integer, format: int64 }
+        merchantId: { type: ['integer', 'null'], format: int64, description: Terisi XOR menuId }
+        menuId: { type: ['integer', 'null'], format: int64 }
+        rating: { type: integer, minimum: 1, maximum: 5 }
+        review: { type: ['string', 'null'] }
+        createdAt: { type: string, format: date-time }
+
+    ReviewReply:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        reviewId: { type: integer, format: int64 }
+        merchantId: { type: integer, format: int64 }
+        body: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    MarketingInput:
+      type: object
+      required: [type, value, activeFrom, activeTo]
+      properties:
+        type: { type: string, enum: [promo_delivery, discount_pct, discount_fixed] }
+        value: { type: number }
+        code: { type: ['string', 'null'], description: null = terapkan otomatis }
+        activeFrom: { type: string, format: date-time }
+        activeTo: { type: string, format: date-time }
+        maxUses: { type: ['integer', 'null'] }
+
+    Marketing:
+      allOf:
+        - $ref: '#/components/schemas/MarketingInput'
+        - type: object
+          properties:
+            id: { type: integer, format: int64 }
+            usedCount: { type: integer }
+
+    ChatMessage:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        chatId: { type: integer, format: int64 }
+        senderId: { type: integer, format: int64 }
+        senderRole: { $ref: '#/components/schemas/UserRole' }
+        channel: { type: string, enum: [customer-merchant, merchant-courier, courier-customer] }
+        body: { type: string }
+        at: { type: string, format: date-time }
+        readAt: { type: ['string', 'null'], format: date-time }
+
+    ChatThread:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        orderId: { type: integer, format: int64 }
+        participants:
+          type: array
+          description: Maksimum 3 peserta (customer, merchant, kurir).
+          items: { type: integer, format: int64 }
+        lastMessage: { type: ['string', 'null'] }
+        lastAt: { type: ['string', 'null'], format: date-time }
+        messages:
+          type: array
+          items: { $ref: '#/components/schemas/ChatMessage' }
+
+    LiabilitySummary:
+      type: object
+      description: Kewajiban = saldo wallet customer + merchant + tips kurir (bukan gaji kurir).
+      properties:
+        customerBalancesJod: { type: number }
+        merchantBalancesJod: { type: number }
+        courierTipsJod: { type: number }
+        totalLiabilityJod: { type: number }
+        asOf: { type: string, format: date-time }
+
+    AuditEntry:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        actorId: { type: ['integer', 'null'], format: int64, description: Operator pelaku. Bukan string nama. }
+        actorRole: { $ref: '#/components/schemas/UserRole' }
+        action: { type: string }
+        target: { type: string, description: Taksonomi target belum diputuskan (AUD-1) }
+        targetId: { type: ['integer', 'null'], format: int64 }
+        at: { type: string, format: date-time }
+        x-unresolved: [AUD-1]
+
+    TaxReport:
+      type: object
+      properties:
+        period: { type: string, example: '2026-10' }
+        platformFeeJod: { type: number }
+        gstJod: { type: ['number', 'null'], description: Tarif final belum diputuskan (TAX-1) }
+        otherTaxJod: { type: ['number', 'null'] }
+        totalTaxJod: { type: ['number', 'null'] }
+        exportUrl: { type: ['string', 'null'], format: uri, description: Format ekspor belum diputuskan (TAX-2) }
+        x-unresolved: [TAX-1, TAX-2]
+
+    PlatformProfit:
+      type: object
+      properties:
+        balanceJod: { type: number }
+        withdrawableJod: { type: number }
+        periodGrossJod: { type: number }
+        periodCostJod: { type: number }
+        asOf: { type: string, format: date-time }
+
+    PlatformSwitch:
+      type: object
+      properties:
+        key: { type: string, enum: [cod_enabled, payout_enabled, maintenance_mode] }
+        enabled: { type: boolean }
+        updatedAt: { type: string, format: date-time }
+        updatedBy: { type: ['integer', 'null'], format: int64 }
+
+    Customer:
+      type: object
+      description: Entitas draft #3. Menampung status risiko customer.
+      properties:
+        id: { type: integer, format: int64 }
+        userId: { type: integer, format: int64, description: 'FK users (draft: users)' }
+        name: { type: string }
+        riskFlag:
+          type: boolean
+          description: Blacklist COD — ditandai Super Admin. Blacklist menyentuh dua sisi (merchant + customer).
+
+    FavMerchant:
+      type: object
+      description: Entitas draft #6 — merchant favorit customer.
+      properties:
+        id: { type: integer, format: int64 }
+        userId: { type: integer, format: int64 }
+        merchantId: { type: integer, format: int64 }
+        createdAt: { type: string, format: date-time }
+
+    PhoneVerification:
+      type: object
+      description: Verifikasi nomor WA (Level 1 — validasi format, tanpa OTP WA).
+      properties:
+        id: { type: integer, format: int64 }
+        userId: { type: integer, format: int64 }
+        phone: { $ref: '#/components/schemas/PhoneE164' }
+        method: { type: string, enum: [format_only, wa_otp] }
+        code: { type: ['string', 'null'] }
+        verifiedAt: { type: ['string', 'null'], format: date-time }
+        expiresAt: { type: ['string', 'null'], format: date-time }
+      x-unresolved: [AUT-1]
+
+    Payment:
+      type: object
+      description: Catatan pembayaran per order (COD/transfer/Xendit).
+      properties:
+        id: { type: integer, format: int64 }
+        orderId: { type: integer, format: int64 }
+        provider: { type: string, enum: [xendit, none] }
+        method: { type: string, enum: [cod, transfer, xendit_va, xendit_qris] }
+        amountJod: { type: number }
+        amountIdr: { type: ['number', 'null'], description: Nilai settlement }
+        externalId: { type: ['string', 'null'], description: ID transaksi di sisi provider }
+        status: { type: string, enum: [unpaid, pending, paid, failed, refunded] }
+        paidAt: { type: ['string', 'null'], format: date-time }
+      x-unresolved: [WEB-1]
+
+    Fee:
+      type: object
+      description: Rincian fee per order (snapshot saat order dibuat).
+      properties:
+        id: { type: integer, format: int64 }
+        orderId: { type: integer, format: int64 }
+        kind: { type: string, enum: [platform_merchant, platform_customer, delivery, service] }
+        amountJod: { type: number }
+        ruleRef: { type: ['string', 'null'], description: Referensi aturan tarif yang dipakai }
+      x-unresolved: [FEE-1]
+
+    Tax:
+      type: object
+      description: Pajak dua lapis (GST Jordan + pajak fee platform).
+      properties:
+        id: { type: integer, format: int64 }
+        orderId: { type: integer, format: int64 }
+        kind: { type: string, enum: [gst_food, platform_income] }
+        ratePct: { type: ['number', 'null'], description: Tarif final belum diputuskan — jangan hardcode }
+        baseJod: { type: number }
+        amountJod: { type: ['number', 'null'] }
+      x-unresolved: [TAX-1]
+
+    Deposit:
+      type: object
+      description: Deposit COD merchant; disetujui CS (kerja operasi, bukan Super Admin).
+      properties:
+        id: { type: integer, format: int64 }
+        merchantId: { type: integer, format: int64 }
+        kind: { type: string, enum: [cod, founding_credit] }
+        amountJod: { type: number }
+        status: { type: string, enum: [unpaid, held, released] }
+        verifiedBy: { type: ['integer', 'null'], format: int64 }
+        verifiedAt: { type: ['string', 'null'], format: date-time }
+      x-unresolved: [FEE-1]
+
+    ProtectionFund:
+      type: object
+      description: Dana proteksi untuk refund sengketa.
+      properties:
+        id: { type: integer, format: int64 }
+        orderId: { type: ['integer', 'null'], format: int64 }
+        disputeId: { type: ['integer', 'null'], format: int64 }
+        amountJod: { type: number }
+        direction: { type: string, enum: [in, out] }
+        createdAt: { type: string, format: date-time }
+
+    MerchantCredit:
+      type: object
+      description: |
+        Modal/kredit merchant: grant founding (5 JOD) + cashback. **Non-withdrawal** — hanya bisa
+        memotong fee order berikutnya. Nama field mengikuti kontrak BE (DEC-2006).
+      properties:
+        id: { type: integer, format: int64 }
+        merchantId: { type: integer, format: int64 }
+        balanceJod: { type: number }
+        rebateTier: { type: ['string', 'null'] }
+        rebatePeriod: { type: ['string', 'null'] }
+        rebateAmountJod: { type: ['number', 'null'] }
+        rebatePaidAt: { type: ['string', 'null'], format: date-time }
+        nonWithdrawable: { type: boolean, default: true }
+      x-unresolved: [INC-1]
+
+    CashbackTier:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        tier: { type: string }
+        minVolumeJod: { type: number }
+        pct: { type: number }
+      x-unresolved: [INC-1]
+
+    ExchangeRate:
+      type: object
+      description: Kurs JOD (display) ↔ IDR (settlement).
+      properties:
+        id: { type: integer, format: int64 }
+        base: { type: string, enum: [JOD, USD] }
+        quote: { type: string, enum: [IDR] }
+        rate: { type: number }
+        source: { type: ['string', 'null'], description: Provider kurs belum diputuskan }
+        fetchedAt: { type: string, format: date-time }
+      x-unresolved: [FX-1]
+
+    PushSubscription:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        userId: { type: integer, format: int64 }
+        endpoint: { type: string, format: uri }
+        keys:
+          type: object
+          required: [p256dh, auth]
+          properties:
+            p256dh: { type: string }
+            auth: { type: string }
+        createdAt: { type: string, format: date-time }
+        lastUsedAt: { type: ['string', 'null'], format: date-time }
+
+    Role:
+      type: object
+      description: Role operator. Dibuat & diatur Super Admin; tidak ada self-registration operator.
+      properties:
+        id: { type: integer, format: int64 }
+        key: { type: string, enum: [cs_ops, sa_ops, sa_owner] }
+        name: { type: string }
+        permissions:
+          type: array
+          items: { type: string, example: tenant.status }
+
+    Operator:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        userId: { type: integer, format: int64 }
+        roleId: { type: integer, format: int64 }
+        active: { type: boolean }
+        createdBy: { type: ['integer', 'null'], format: int64, description: SA yang membuat akun operator }
+
+x-traceability:
+  description: |
+    Peta requirement → flow → endpoint/event, supaya kontrak bisa ditelusuri balik ke PRD & flow.
+    Sumber: `za7tein-pwa/docs/design/flows/INDEX.json` §trace dan `source.md` (R-*).
+    Requirement yang belum punya baris di sini berarti **belum dipetakan** — jangan diasumsikan tercakup.
+  requirements:
+    - id: R-COD-01
+      flows: [f1-order-lifecycle, f2-cod-hold, f24-payment-methods]
+      entities: [Order, WalletHold, LedgerEntry, Payment]
+      operations:
+        - 'POST /orders'
+        - 'POST /orders/{id}/otp/verify'
+        - 'POST /orders/{id}/cancel'
+        - 'GET /wallet/holds'
+      events: [reserve_created, reserve_settled, reserve_released, payment_confirmed]
+    - id: R-TOPUP-01
+      flows: [f3-wallet-topup]
+      entities: [TopUp, Wallet, LedgerEntry]
+      operations: ['POST /wallet/topups', 'GET /wallet/topups/{id}']
+      events: [top_up_completed, topup_gate_pending]
+    - id: R-WALLET-01
+      flows: [f3-wallet-topup, f6-cashout-payout]
+      entities: [Wallet, LedgerEntry]
+      operations: ['GET /wallet', 'POST /wallet/cashouts']
+      events: [ledger_entry]
+    - id: R-FEE-01
+      flows: [f4-fee-tax]
+      entities: [Order, Fee]
+      operations: ['POST /orders']
+      events: [fee_computed]
+    - id: R-TAX-01
+      flows: [f4-fee-tax]
+      entities: [Tax, TaxReport]
+      operations: ['GET /superadmin/tax-reports']
+      events: []
+      unresolved: [TAX-1, TAX-2]
+    - id: R-DELIV-01
+      flows: [f5-delivery-verification, f13-courier-view]
+      entities: [Order, Checkpoint, WalletHold]
+      operations:
+        - 'POST /orders/{id}/courier/assign'
+        - 'POST /orders/{id}/courier/accept'
+        - 'POST /orders/{id}/checkpoints'
+        - 'POST /orders/{id}/otp/verify'
+      events: [checkpoint_recorded, courier_match, otp_verified]
+      unresolved: [SLA-1]
+    - id: R-CASHOUT-01
+      flows: [f6-cashout-payout]
+      entities: [CashOut, Wallet]
+      operations: ['POST /wallet/cashouts']
+      events: [cashout_requested]
+      unresolved: [CO-1]
+    - id: R-LEDGER-01
+      flows: [f7-ledger-liability]
+      entities: [LedgerEntry, LiabilitySummary]
+      operations: ['GET /ledger', 'GET /admin/liability']
+      events: [ledger_entry, ledger_monitored]
+    - id: R-DISPUTE-01
+      flows: [f8-dispute, f15-super-admin]
+      entities: [Dispute, ProtectionFund]
+      operations:
+        - 'POST /disputes'
+        - 'POST /disputes/{id}/resolve'
+        - 'POST /disputes/{id}/appeals'
+      events: [dispute_opened, dispute_resolved, appeal_decided]
+      unresolved: [DSP-1, APL-1]
+    - id: R-INCENTIVE-01
+      flows: [f9-incentive]
+      entities: [MerchantCredit, CashbackTier]
+      operations: []
+      events: [fee_deducted_from_credit]
+      unresolved: [INC-1]
+    - id: R-CURR-01
+      flows: [f10-exchange-rate]
+      entities: [ExchangeRate]
+      operations: []
+      events: [rate_fetched]
+      unresolved: [FX-1]
+    - id: R-PUSH-01
+      flows: [f11-push-notification]
+      entities: [PushSubscription]
+      operations: ['POST /push/subscriptions']
+      events: [push_sent, wa_fallback_ready]
+    - id: R-RATE-01
+      flows: [f19-rating-review, f18-order-state]
+      entities: [RatingReview, ReviewReply]
+      operations: ['POST /orders/{id}/review', 'POST /reviews/{id}/reply']
+      events: [review_prompt, review_saved]
+      unresolved: [RATE-1, RATE-2]
+    - id: R-ADDR-01
+      flows: [f20-address-zone]
+      entities: [Address, Zone, Merchant]
+      operations: ['POST /coverage/resolve', 'POST /me/addresses']
+      events: [coverage_checked, order_zone_snapshot, zone_master_defined]
+      unresolved: [ZON-1]
+
+x-realtime:
+  description: |
+    Kanal realtime memakai WebSocket. Nama event diambil dari
+    `za7tein-pwa/docs/design/flows/INDEX.json` supaya kontrak dan flow tidak menyimpang.
+    Payload tiap event adalah objek entitas yang bersangkutan (bentuk sama dengan REST).
+  transport: websocket
+  auth:
+    queryParam: access_token
+    note: Token sesi yang sama dengan REST; kanal hanya mengirim data yang boleh dilihat peran itu.
+  channels:
+    - topic: orders
+      scope: '[role-scoped]'
+      events:
+        - { name: order_created, entity: Order, source: "f1-order-lifecycle" }
+        - { name: order_status_changed, entity: Order, source: "f18-order-state" }
+        - { name: order_accepted, entity: Order, source: "f12-merchant-console" }
+        - { name: merchant_ready, entity: Order, source: "f18-order-state" }
+        - { name: courier_match, entity: Order, source: "f12-merchant-console:assign" }
+        - { name: otp_verified, entity: Order, source: "f13-courier-view:selesai" }
+        - { name: fee_computed, entity: Fee, source: "f1-order-lifecycle:checkout" }
+        - { name: payment_method_selected, entity: Order, source: "f1-order-lifecycle:payMethod" }
+        - { name: order_zone_snapshot, entity: Order, source: "f20-address-zone:order" }
+        - { name: review_prompt, entity: Order, source: "f18-order-state:done" }
+        - { name: merchant_selected, entity: Merchant, source: "f23-customer-discovery:lanjut" }
+        - { name: order_created, entity: Order, source: "-", x-source: "tambahan: tidak ada di flows/INDEX.json" }
+    - topic: wallet
+      scope: '[user]'
+      events:
+        - { name: reserve_created, entity: WalletHold, source: "f1-order-lifecycle:order" }
+        - { name: reserve_settled, entity: WalletHold, source: "f1-order-lifecycle:otp" }
+        - { name: reserve_released, entity: WalletHold, source: "f1-order-lifecycle:batal" }
+        - { name: top_up_completed, entity: TopUp, source: "f3-wallet-topup" }
+        - { name: ledger_entry, entity: LedgerEntry, source: "f7-ledger-liability" }
+        - { name: cashout_requested, entity: CashOut, source: "f6-cashout-payout" }
+        - { name: fee_deducted_from_credit, entity: MerchantCredit, source: "f9-incentive" }
+        - { name: payment_confirmed, entity: Payment, source: "f17-payment-xendit:paid" }
+        - { name: topup_gate_pending, entity: Wallet, source: "f21-account-auth:order" }
+    - topic: chat
+      scope: '[order:participants]'
+      events:
+        - { name: chat_opened, entity: ChatThread, source: "f14-chat-order:placed" }
+        - { name: courier_joined_chat, entity: ChatThread, source: "f13-courier-view:selesai" }
+        - { name: message_created, entity: ChatMessage, source: "f14-chat-order", x-source: "tambahan: tidak ada di flows/INDEX.json" }
+    - topic: courier
+      scope: '[merchant,order]'
+      events:
+        - { name: courier_location_updated, entity: Courier, source: "f13-courier-view" }
+        - { name: checkpoint_recorded, entity: Checkpoint, source: "f5-delivery-verification", aliases: ["checkpoint_*"] }
+        - { name: courier_location_updated, entity: Courier, source: "-", x-source: "tambahan: tidak ada di flows/INDEX.json" }
+    - topic: disputes
+      scope: '[cs,superadmin,order:parties]'
+      events:
+        - { name: dispute_opened, entity: Dispute, source: "f8-dispute" }
+        - { name: dispute_resolved, entity: Dispute, source: "f15-super-admin:dispute" }
+        - { name: verdict_appealed, entity: Dispute, source: "f15-super-admin:dispute" }
+        - { name: appeal_decided, entity: Dispute, source: "f22-super-admin-sa:appeal" }
+    - topic: tenant
+      scope: '[cs,superadmin,merchant]'
+      events:
+        - { name: tenant_submitted, entity: Merchant, source: "f16-merchant-onboarding:submit" }
+        - { name: deposit_held, entity: Merchant, source: "f15-super-admin:deposit" }
+        - { name: cod_blocked, entity: Merchant, source: "f15-super-admin:blacklist" }
+        - { name: tenant_signup, entity: Merchant, source: "f21-account-auth:onboard" }
+        - { name: delivery_config_set, entity: Merchant, source: "f16-merchant-onboarding:profil" }
+    - topic: zone
+      scope: '[all]'
+      events:
+        - { name: zone_master_defined, entity: Zone, source: "f22-super-admin-sa:zone" }
+        - { name: coverage_checked, entity: Zone, source: "f20-address-zone:gate" }
+    - topic: ratings
+      scope: '[merchant,customer,cs]'
+      events:
+        - { name: review_saved, entity: RatingReview, source: "f19-rating-review:submit" }
+    - topic: platform
+      scope: '[superadmin,cs]'
+      events:
+        - { name: liability_view, entity: LiabilitySummary, source: "f15-super-admin:liability" }
+        - { name: ledger_monitored, entity: LedgerEntry, source: "f7-ledger-liability" }
+        - { name: push_sent, entity: PushSubscription, source: "f11-push-notification" }
+        - { name: rate_fetched, entity: ExchangeRate, source: "f10-exchange-rate" }
+        - { name: wa_fallback_ready, entity: PhoneVerification, source: "f21-account-auth:phone" }
+
+x-unresolved:
+  description: |
+    Item ini **tidak boleh diisi dengan tebakan**. Setiap endpoint/field yang bergantung
+    padanya sudah ditandai `x-unresolved`. Pemilik keputusan adalah PO, kecuali disebut lain.
+  items:
+    - id: SLA-1
+      sourceIds: [DEC-1037]
+      topic: Angka SLA prepare/delivery (15/30/10 masih sementara)
+      affects: ["Batch.slaPrepareDeadline", "Batch.slaDeliveryDeadline", "POST /orders/{id}/prepare", "POST /orders/{id}/checkpoints"]
+    - id: FEE-1
+      sourceIds: [DEC-1037, DEC-1038]
+      topic: Rincian fee final per metode (0,37 JOD platform; merchant 0,15 + customer 0,22)
+      affects: ["Order.platformFeeJod", "POST /admin/tenants/{id}/deposit"]
+    - id: TAX-1
+      sourceIds: [OQ-2, OQ-3, OQ-4, OQ-17, OQ-18]
+      topic: Tarif pajak final (GST Jordan + pajak fee platform)
+      affects: ["TaxReport.gstJod", "GET /superadmin/tax-reports"]
+      owner: konsultan pajak
+    - id: TAX-2
+      sourceIds: [decision-irbid-mvp (export laporan pajak)]
+      topic: Format ekspor laporan pajak (CSV/PDF), periode fiskal, penerima laporan
+      affects: ["TaxReport.exportUrl"]
+    - id: CO-1
+      sourceIds: [OQ-16, OQ-22]
+      topic: Fee cash-out
+      affects: ["CashOut.feeJod", "POST /wallet/cashouts"]
+    - id: FX-1
+      sourceIds: [OQ-26, OQ-28]
+      topic: Provider kurs IDR/JOD + jadwal pembaruan
+      affects: ["TopUp.amountIdr", "POST /wallet/topups"]
+    - id: DSP-1
+      sourceIds: [OQ-29]
+      topic: Kategori + SLA resolusi sengketa (window 24 jam bersifat sementara)
+      affects: ["Dispute.windowClosesAt", "POST /disputes", "POST /disputes/{id}/resolve"]
+    - id: RSV-1
+      sourceIds: [decision-irbid-mvp (expiry reserve)]
+      topic: Apakah reserve punya batas waktu/expiry bila order menggantung
+      affects: ["WalletHold", "POST /orders"]
+    - id: OST-1
+      sourceIds: [schema-draft-v1 (quotation vs placed), C-17]
+      topic: 'Bahasa status: `quotation` (draft BE) vs `placed` (flow F1)'
+      affects: ["Order.status"]
+    - id: AUD-1
+      sourceIds: [decision-irbid-mvp (taksonomi target audit)]
+      topic: Taksonomi `audit_logs.target` (masih string tampilan)
+      affects: ["AuditEntry.target"]
+    - id: AUT-1
+      sourceIds: [AUTH-1, OQ-24, OQ-30]
+      topic: Auth Super Admin & operator CS (konsol SA belum punya login)
+      affects: ["POST /auth/register", "POST /auth/login"]
+    - id: ZON-1
+      sourceIds: [C-13, f20]
+      topic: Perhitungan zone saat simpan pin (haversine ke merchant) — ambang & aturan final
+      affects: ["Address.zone", "POST /me/addresses", "POST /coverage/resolve"]
+    - id: RATE-1
+      sourceIds: [BRS rating-review-2026-09-22]
+      topic: Jendela pengisian ulasan, edit/hapus, tag cepat, moderasi, ambang rata-rata
+      affects: ["POST /orders/{id}/review"]
+    - id: RATE-2
+      sourceIds: [X-MR-1]
+      topic: Apakah ulasan + balasan merchant masuk lingkup MVP
+      affects: ["GET /merchants/{id}/reviews", "POST /reviews/{id}/reply"]
+    - id: CHAT-1
+      sourceIds: [C-18 (retensi chat)]
+      topic: Retensi chat (N hari)
+      affects: ["ChatThread", "ChatMessage"]
+    - id: MKT-1
+      sourceIds: [MARK-1]
+      topic: Apakah marketing/promo masuk MVP
+      affects: ["GET /promos", "POST /promos", "POST /promos/validate"]
+    - id: APL-1
+      sourceIds: [decision-irbid-mvp (aturan banding)]
+      topic: Aturan banding sengketa (siapa boleh mengajukan, window/SLA)
+      affects: ["POST /disputes/{id}/appeals"]
+    - id: WEB-1
+      sourceIds: [OQ-25]
+      topic: Idempotency key, retry webhook, dan masa berlaku VA Xendit
+      affects: ["POST /webhooks/xendit", "TopUp.expiresAt"]
+    - id: INC-1
+      sourceIds: [I-4, I-5]
+      topic: Insentif merchant — I-4/I-5 belum diputuskan
+      affects: ["MerchantCredit", "CashbackTier"]
