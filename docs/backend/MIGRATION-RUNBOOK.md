@@ -50,6 +50,14 @@ berjalan bersih di Postgres lokal → 42 tabel, RLS 42/42, 59 policy, seed `user
 1. `npm run db:migrations:bundle` → buka `supabase/apply-all.sql`
 2. Salin SELURUH isinya → SQL Editor → **Run sekali**
 3. Verifikasi dari terminal: `npm run db:remote-check` → harus `HASIL: SIAP`
+4. **Hubungkan akun Supabase Auth ke `users`** (tanpa ini login gagal walau berhasil autentikasi):
+   `npm run db:link-auth` (dry-run) lalu `npm run db:link-auth -- --apply`.
+   Sebab: `0005` membuat baris `users` tanpa `auth_user_id` (akun auth tidak bisa dibuat lewat SQL),
+   sedangkan RLS & `loadUserRow()` mencari `users.auth_user_id = auth.uid()`.
+
+> **Sudah dijalankan untuk project `dwzxtnfesmpobnepilhl` (2026-10-09):** 42/42 tabel, skema lama
+> bersih, seed terisi, 4 akun demo terhubung ke auth, 4 portal dideploy, dan alur baca (login →
+> katalog → profil) diuji langsung lewat REST. Backup data lama: `supabase/backup-legacy-2026-10-09/`.
 
 Bagian `0005` di dalam berkas itu berisi data demo (4 user, 1 merchant, 4 menu, 3 wallet). Kalau
 tidak mau, hapus blok `-- ########## 0005_seed_irbid.sql ##########` sebelum Run.

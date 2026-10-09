@@ -62,8 +62,15 @@ def tables_from_migrations():
     return sorted(names)
 
 
-def probe(url, key, table, select='id', limit=0):
-    """GET 1 halaman kecil. Kembalikan (status_code, daftar baris / None)."""
+def probe(url, key, table, select='*', limit=0):
+    """GET 1 halaman kecil. Kembalikan (status_code, daftar baris / None).
+
+    `select='*'` dipakai untuk cek keberadaan tabel — JANGAN pakai `select=id`,
+    karena tidak semua tabel punya kolom `id` (`chat_participants` pakai pk
+    gabungan, `platform_switches` pakai `key`). `select=<kolom>` tetap dipakai
+    untuk memeriksa kolom tertentu: 200 = kolom ada, 400 = tabel ada tapi kolom
+    tidak, 404 = tabel tidak ada.
+    """
     req = urllib.request.Request(
         f'{url}/rest/v1/{table}?select={select}&limit={limit}',
         headers={'apikey': key, 'Authorization': f'Bearer {key}', 'Accept': 'application/json'},
@@ -75,6 +82,23 @@ def probe(url, key, table, select='id', limit=0):
         return e.code, None
     except Exception as e:            # noqa: BLE001 - laporkan apa adanya
         return 0, str(e)
+
+
+def count_rows(url, key, table):
+    """Jumlah baris tepat lewat header Content-Range (Prefer: count=exact)."""
+    req = urllib.request.Request(
+        f'{url}/rest/v1/{table}?select=*',
+        headers={
+            'apikey': key, 'Authorization': f'Bearer {key}',
+            'Accept': 'application/json', 'Prefer': 'count=exact', 'Range': '0-0',
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            cr = r.headers.get('Content-Range', '')      # contoh: "0-0/42"
+            return int(cr.split('/')[-1]) if '/' in cr else None
+    except Exception:                # noqa: BLE001
+        return None
 
 
 def main():
@@ -123,9 +147,8 @@ def main():
     print('\n-- 2. tabel seed tidak kosong --')
     empty = []
     for t in SEEDED:
-        code, rows = probe(url, key, t, select='id', limit=200)
-        n = len(rows) if isinstance(rows, list) else -1
-        print(f'  {t}: {n if n >= 0 else "?"} baris')
+        n = count_rows(url, key, t)
+        print(f'  {t}: {"tidak terhitung" if n is None else str(n) + " baris"}')
         if n == 0:
             empty.append(t)
 

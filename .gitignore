@@ -28,3 +28,4 @@ apps/*/ios/App/DerivedData
 # Cadangan data sebelum migrasi destruktif (berisi data pribadi: email, telepon,
 # catatan order). JANGAN di-commit ke repo publik.
 supabase/backup-legacy-*/
+.env*

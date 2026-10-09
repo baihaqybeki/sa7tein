@@ -37,6 +37,7 @@
     "db:migrations:sync": "/usr/bin/python3 scripts/sync-migrations.py",
     "db:migrations:bundle": "/usr/bin/python3 scripts/bundle-migrations.py",
     "db:remote-check": "/usr/bin/python3 scripts/check-remote-schema.py",
+    "db:link-auth": "/usr/bin/python3 scripts/link-auth-users.py",
     "db:verify": "./scripts/verify-migrations.sh",
     "db:e2e": "./scripts/e2e-irbid.sh",
     "db:audit-backend": "/usr/bin/python3 scripts/audit-backend-schema.py",

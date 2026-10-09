@@ -1,7 +1,9 @@
 # M6 — Adapter Backend Skema Baru (ERD Irbid)
 
-Status: **skema baru sekarang jadi jalur DEFAULT.** Portal lama sengaja diputus (keputusan pemilik
-produk: "putus saja gapaap, agar bisa diconsume ke ui baru") — lihat §1.
+Status: **skema baru sekarang jadi jalur DEFAULT dan sudah LIVE di produksi.** Cloud Supabase
+dimigrasikan 2026-10-09 (42/42 tabel, skema lama dibuang setelah backup) dan 4 portal dideploy
+memakai skema baru. Portal lama sengaja diputus (keputusan pemilik produk: "putus saja gapaap, agar
+bisa diconsume ke ui baru") — lihat §1.
 
 | | |
 |---|---|
@@ -228,6 +230,13 @@ kembali ke salinan sementara (`AUDIT_TARGET=/tmp/mutN.js`), dan keduanya **dilap
    ini perlu kolom baru (keputusan produk).
 4. **Mode demo lokal masih skema lama.** `localBackend.js` (dipakai bila Supabase kosong) tetap
    berbentuk skema lama. Jadi jalur "tanpa Supabase" tidak setara dengan default baru.
+5. **UI 4 portal lama belum menyesuaikan** (inilah wujud "putus" yang disetujui). Terukur:
+   **~143 rujukan skema lama di 15 berkas** — `formatRupiah` 44×, literal status lama (64×:
+   `'pending'` 12, `'delivered'` 14, `'ready'` 11, `'on_the_way'` 10, `'picked_up'` 7,
+   `'preparing'` 5, `'accepted'` 5), nama field lama ~35× (`subtotal`, `courierCost`,
+   `restaurantName`, `restaurantId`, `.emoji`). Gejala yang terlihat di portal live:
+   toko selalu tampil **🔴 Closed** karena `Home.jsx:49` membaca `merchant.open`
+   (`merchantStatus[m.id] ?? m.open`) yang sudah diganti `available`.
 
 ## 10. Yang menghalangi konsumsi oleh UI baru (butuh keputusan produk)
 

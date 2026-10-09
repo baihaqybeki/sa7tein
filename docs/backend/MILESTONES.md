@@ -38,9 +38,9 @@ Keputusan PO 2026-10-09 (menyimpang dari catatan sebelumnya, dicatat eksplisit):
 | M3 | ✅ selesai | `supabase/migrations/0002_order_money.sql` (18 tabel) |
 | M4 | ✅ selesai | `supabase/migrations/0003_ops_platform.sql` (14 tabel) |
 | M5 | ✅ selesai | `0004_indexes_rls_realtime.sql` + `0005_seed_irbid.sql` + `0006_append_only_guards.sql` — RLS **42/42**, 59 policy, 11 tabel realtime, seed JOD, penjaga append-only |
-| M6 | 🟡 **sebagian** — adapter jadi DEFAULT | `irbidBackend.js` (942 baris, 33 metode). Skema baru = default; `VITE_SCHEMA=legacy` jadi jalan pulang. **4 portal lama sengaja diputus** (keputusan pemilik produk). Audit skema: 32 tabel / 195 kolom / 17 relasi / 29 objek insert, 0 rujukan tidak dikenal (auditor diuji mutasi). **DoD belum**: reserve/hold, gerbang zona, timestamp per-status belum ada; UI baru belum cocok (mata uang, kosakata status, format id) — `docs/backend/M6-ADAPTER.md` §9–§10 |
-| M7 | 🟡 draft | `docs/backend/openapi.yaml` — 68 path / 83 operasi, audit 1:1 **LULUS**; final menyusul setelah M6 |
-| M8 | 🟡 sebagian | `MIGRATION-RUNBOOK.md` ✅ · selaraskan SRS/FSD + deploy ulang ⛔ |
+| M6 | 🟡 **sebagian** — adapter **live di produksi** | `irbidBackend.js` (942 baris, 33 metode). Skema baru = default; `VITE_SCHEMA=legacy` jalan pulang. **2026-10-09: cloud Supabase dimigrasikan (42/42 tabel) + 4 portal dideploy** — portal lama kini membaca skema baru. Audit skema: 32 tabel / 195 kolom / 17 relasi / 29 objek insert, 0 rujukan tidak dikenal (auditor diuji mutasi). **DoD belum**: reserve/hold, gerbang zona, timestamp per-status; UI lama masih memakai nama field lama (~143 rujukan di 15 berkas); UI baru belum cocok (mata uang, kosakata status, format id) — `docs/backend/M6-ADAPTER.md` §9–§10 |
+| M7 | 🟡 draft | `docs/backend/openapi.yaml` — 68 path / 83 operasi, audit 1:1 **LULUS** |
+| M8 | 🟡 sebagian | `MIGRATION-RUNBOOK.md` ✅ · **migrasi cloud + deploy 4 portal (2026-10-09)** ✅ · selaraskan SRS/FSD ⛔ |
 
 **Cara memverifikasi klaim di tabel ini** (bukan janji, bisa dijalankan siapa pun):
 
