@@ -20,21 +20,41 @@ Baca sampai habis sebelum menekan Enter.
 - [ ] **Backup diambil dan sudah diuji restore-nya** (bukan sekadar "sudah pernah backup"):
       - Supabase Dashboard → Database → Backups (atau `pg_dump`)
       - Simpan juga isi 7 tabel lama sebagai CSV bila perlu jejak
+- [ ] **Backup lewat REST sudah ada** (kalau belum): isi 7 tabel lama diekspor baca-saja ke
+      `supabase/backup-legacy-<tanggal>/` memakai `SUPABASE_SERVICE_ROLE_KEY`. Folder ini
+      **di-gitignore** karena berisi data pribadi. Ini jaring pengaman, **bukan** pengganti
+      backup dashboard (tidak menyertakan auth users).
 - [ ] Cabang kerja bukan `main` (lihat §5)
 - [ ] `npm run db:verify` **lulus di lokal** sebelum menyentuh cloud
 
 ## 2. Verifikasi lokal dulu (wajib, 30 detik)
 
 ```bash
-npm run db:migrations:sync   # pastikan migrasi = ERD.md (tidak drift)
-npm run db:verify            # cluster sementara → jalankan 0000..0006 → uji constraint & RLS
-npm run db:e2e               # alur bisnis: reserve→settle, batal→release, race claim, append-only
+npm run db:migrations:sync     # pastikan migrasi = ERD.md (tidak drift)
+npm run db:migrations:bundle   # pastikan supabase/apply-all.sql sinkron dengan 0000-0006
+npm run db:verify              # cluster sementara → jalankan 0000..0006 → uji constraint & RLS
+npm run db:e2e                 # alur bisnis: reserve→settle, batal→release, race claim, append-only
 ```
 
 Harus berakhir `LULUS — migrasi berjalan, constraint & RLS berlaku, seed benar` dan
-`E2E LULUS — 23 pemeriksaan`. Kalau tidak lulus, **berhenti** — jangan lanjut ke cloud.
+`E2E LULUS — 26 pemeriksaan`. Kalau tidak lulus, **berhenti** — jangan lanjut ke cloud.
 
 ## 3. Langkah di Supabase
+
+### Jalur cepat (disarankan): satu berkas
+
+`supabase/apply-all.sql` = migrasi `0000`–`0006` berurutan dalam satu berkas, **di-generate** oleh
+`npm run db:migrations:bundle` (ada mode `--check`, jadi tidak bisa basi). Sudah diuji: berkas ini
+berjalan bersih di Postgres lokal → 42 tabel, RLS 42/42, 59 policy, seed `users=4`.
+
+1. `npm run db:migrations:bundle` → buka `supabase/apply-all.sql`
+2. Salin SELURUH isinya → SQL Editor → **Run sekali**
+3. Verifikasi dari terminal: `npm run db:remote-check` → harus `HASIL: SIAP`
+
+Bagian `0005` di dalam berkas itu berisi data demo (4 user, 1 merchant, 4 menu, 3 wallet). Kalau
+tidak mau, hapus blok `-- ########## 0005_seed_irbid.sql ##########` sebelum Run.
+
+### Jalur hati-hati: satu per satu
 
 Jalankan **satu per satu**, bukan ditempel semua sekaligus, supaya kegagalan mudah dilokalisasi.
 
@@ -75,16 +95,22 @@ select role, count(*) from public.users group by role;
 
 ## 5. Urutan yang aman (portal live)
 
+Status 2026-10-09: **M6 sudah jadi default** — adapter memakai tabel baru tanpa env var apa pun
+(`VITE_SCHEMA=legacy` only sebagai jalan pulang). Jadi setelah cloud dimigrasikan, portal hasil
+deploy otomatis memakai skema baru. Konsekuensinya: **4 portal lama tidak lagi cocok** dengan
+bentuk data yang dikembalikan adapter (portal lama butuh `VITE_SCHEMA=legacy`).
+
 ```
 branch: feat/irbid-schema
-  1. migrasi di project Supabase TERPISAH (staging) — bukan yang dipakai portal live
-  2. M6: perbarui supabaseBackend.js + localBackend.js ke tabel baru
-  3. arahkan 4 portal ke staging, uji E2E (order → accept → assign → antar → OTP → settle)
-  4. baru migrasi project produksi, lalu deploy ulang Vercel
-  5. merge ke main setelah semuanya hijau
+  1. (opsional) migrasi di project Supabase TERPISAH (staging) — produksi tidak disentuh
+  2. backup (dashboard + supabase/backup-legacy-*/)                              ← WAJIB
+  3. paste supabase/apply-all.sql di SQL Editor project target
+  4. npm run db:remote-check  → harus SIAP
+  5. deploy 4 portal (npm run deploy:customer|merchant|courier|cs) + api docs
+  6. merge ke main setelah semuanya hijau
 ```
 
-**Jangan** menjalankan migrasi di project produksi selagi portal masih memakai skema lama.
+**Jangan** menjalankan migrasi di project produksi tanpa butir 2 selesai.
 
 ## 6. Rollback
 

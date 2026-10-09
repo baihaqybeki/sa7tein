@@ -48,6 +48,8 @@ Keputusan PO 2026-10-09 (menyimpang dari catatan sebelumnya, dicatat eksplisit):
 npm run db:verify            # jalankan 0000–0006 di Postgres lokal + uji constraint, append-only & RLS
 npm run db:e2e               # alur bisnis end-to-end (26 pemeriksaan)
 npm run db:migrations:sync   # pastikan migrasi == ERD.md (tidak drift)
+npm run db:migrations:bundle # pastikan supabase/apply-all.sql sinkron dengan 0000-0006
+npm run db:remote-check      # cek skema di Supabase CLOUD (read-only): siap deploy atau belum
 npm run db:audit-backend     # tabel/kolom/relasi yang dirujuk adapter benar-benar ada di skema
 npm run api:audit            # audit 1:1 kontrak API vs sumber spek
 ```

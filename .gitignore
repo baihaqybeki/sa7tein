@@ -24,3 +24,7 @@ apps/*/ios/App/DerivedData
 .env
 .env.*
 !.env.example
+
+# Cadangan data sebelum migrasi destruktif (berisi data pribadi: email, telepon,
+# catatan order). JANGAN di-commit ke repo publik.
+supabase/backup-legacy-*/
