@@ -1,28 +1,27 @@
 // ============================================================
 //  Pemilih backend otomatis:
-//  - Supabase dikonfigurasi + VITE_SCHEMA=irbid -> adapter SKEMA BARU (M6)
-//  - Supabase dikonfigurasi                     -> backend cloud skema lama
+//  - Supabase dikonfigurasi + (default)         -> adapter SKEMA BARU (ERD Irbid)
+//  - Supabase dikonfigurasi + VITE_SCHEMA=legacy -> backend cloud skema LAMA
 //  - Selain itu                                 -> mode demo lokal (localStorage)
 //
-//  Kenapa pakai saklar VITE_SCHEMA, bukan langsung diganti:
-//  4 portal produksi (sa7tein-*.vercel.app) masih memakai skema lama. Saklar ini
-//  membuat migrasi bisa diuji di environment terpisah tanpa mematikan produksi.
-//  Lihat docs/backend/MIGRATION-RUNBOOK.md §5.
+//  DEFAULT = SKEMA BARU. Keputusan pemilik produk: 4 portal lama boleh putus,
+//  yang penting skema baru bisa dikonsumsi.
+//  `VITE_SCHEMA=legacy` tinggal sebagai jalan pulang, bukan lagi syarat untuk
+//  memakai skema baru. Lihat docs/backend/M6-ADAPTER.md §1.
 // ============================================================
 import { isSupabaseConfigured } from '../supabaseClient.js';
 import { localBackend } from './localBackend.js';
 import { supabaseBackend } from './supabaseBackend.js';
 import { irbidBackend } from './irbidBackend.js';
 
-// 'irbid' = pakai ERD Irbid (42 tabel). Nilai lain/kosong = skema lama.
 // Ditulis TANPA optional chaining (`import.meta.env.VITE_SCHEMA`) supaya Vite
-// menyubstitusi nilainya jadi literal saat build → Rollup bisa membuang adapter
+// menyubstitusi nilainya jadi literal saat build -> Rollup bisa membuang adapter
 // yang tidak dipakai dari bundle (bukan sekadar tidak dipanggil).
-const TARGET_SCHEMA = import.meta.env.VITE_SCHEMA === 'irbid' ? 'irbid' : 'legacy';
+const TARGET_SCHEMA = import.meta.env.VITE_SCHEMA === 'legacy' ? 'legacy' : 'irbid';
 
 export function getBackend() {
   if (!isSupabaseConfigured) return localBackend;
-  return TARGET_SCHEMA === 'irbid' ? irbidBackend : supabaseBackend;
+  return TARGET_SCHEMA === 'legacy' ? supabaseBackend : irbidBackend;
 }
 
 export function getBackendMode() {

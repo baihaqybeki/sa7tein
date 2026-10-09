@@ -13,9 +13,13 @@ Yang diperiksa:
   2. kolom di `.select('...')`      → kolom ada di tabel itu
      termasuk bentuk bersarang: `dependen(kolom, ...)` dan alias `x:tabel(kolom)`
   3. kunci objek `.insert/.update/.upsert({...})` → kolom ada
-  4. argumen `.eq/.in/.is/.gt/.gte/.lt/.order/.neq('kolom')` → kolom ada
-  5. relasi bersarang → ada FK dari tabel anak ke tabel induk (syarat PostgREST)
-  6. daftar tabel di `resetDemo()` (dipakai via variabel) → tabel ada
+     termasuk objek yang ditampung variabel (`const row = {...}`) atau dibangun
+     lewat `.map((x) => ({...}))`
+  4. `.insert`/`.upsert` wajib mengisi kolom NOT NULL yang tidak punya default,
+     dan nilainya tidak boleh `null` / `... ?? null`
+  5. argumen `.eq/.in/.is/.gt/.gte/.lt/.order/.neq('kolom')` → kolom ada
+  6. relasi bersarang → ada FK dari tabel anak ke tabel induk (syarat PostgREST)
+  7. daftar tabel di `resetDemo()` (dipakai via variabel) → tabel ada
 
 Pemakaian:
     /usr/bin/python3 scripts/audit-backend-schema.py [port]
@@ -33,7 +37,10 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MIG = os.path.join(ROOT, 'supabase', 'migrations')
-TARGET = os.path.join(ROOT, 'packages', 'shared', 'src', 'lib', 'backend', 'irbidBackend.js')
+TARGET = os.environ.get(
+    'AUDIT_TARGET',
+    os.path.join(ROOT, 'packages', 'shared', 'src', 'lib', 'backend', 'irbidBackend.js'),
+)
 PG = os.environ.get('PG_BIN', '/usr/local/bin')
 PORT = sys.argv[1] if len(sys.argv) > 1 else '55470'
 PGDATA = f'/tmp/sa7tein-audit-pg-{PORT}'
@@ -93,7 +100,14 @@ def boot_and_introspect():
     fk_luar = int(psql("select count(*) from pg_constraint c join pg_class t on t.oid=c.confrelid "
                        "join pg_namespace n on n.oid=t.relnamespace where c.contype='f' "
                        "and n.nspname <> 'public'") or 0)
-    return cols, fks, (fk_rows, total_fk, fk_luar)
+    # Kolom wajib: NOT NULL tanpa default dan bukan identity.
+    required = {}
+    for line in psql("select table_name, column_name from information_schema.columns "
+                     "where table_schema='public' and is_nullable='NO' "
+                     "and column_default is null and is_identity='NO'").splitlines():
+        t, c = line.split('|')
+        required.setdefault(t, set()).add(c)
+    return cols, fks, (fk_rows, total_fk, fk_luar), required
 
 
 def cleanup():
@@ -143,12 +157,124 @@ def parse_select_list(sel):
     return flat, [n for n in nested], nested
 
 
-def audit_adapter(src, cols, fks):
+def match_pair(s, i, open_ch, close_ch):
+    """i = indeks karakter pembuka -> indeks tepat setelah pasangannya."""
+    depth = 0
+    while i < len(s):
+        if s[i] == open_ch:
+            depth += 1
+        elif s[i] == close_ch:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return len(s)
+
+
+def object_entries(body):
+    """Isi di dalam { } -> {key: nilai} untuk key tingkat atas saja."""
+    out = {}
+    depth, buf, parts = 0, '', []
+    for ch in body:
+        if ch in '{[(':
+            depth += 1
+        elif ch in '}])':
+            depth -= 1
+        if ch == ',' and depth == 0:
+            parts.append(buf)
+            buf = ''
+        else:
+            buf += ch
+    parts.append(buf)
+    for p in parts:
+        # Buang komentar baris dulu: `a: 1, // catatan\n b: 2` membuat bagian
+        # berikutnya ikut menempel di belakang komentar dan kuncinya hilang.
+        p = re.sub(r'//[^\n]*', '', p)
+        m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$", p, re.S)
+        if m:
+            out[m.group(1)] = ' '.join(m.group(2).split())
+            continue
+        # properti singkat: { role, phone } == { role: role, phone: phone }
+        m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*$", p)
+        if m:
+            out[m.group(1)] = m.group(1)
+    return out
+
+
+def insert_objects(arg, src, abs_pos):
+    """Cari object literal pada argumen insert/update/upsert.
+
+    Menangani: `{...}` langsung, variabel (`const row = {...}`), dan objek yang
+    dibangun `.map((x) => ({...}))` (dulu luput dari pemeriksaan).
+    `abs_pos` = posisi panggilan insert di dalam src, supaya `const NAME =` yang
+    diambil adalah yang TERDEKAT SEBELUMNYA, bukan kemunculan pertama di berkas.
+    """
+    objs = []
+    cands = []
+    t = arg.strip()
+    if t.startswith('{'):
+        return [t[1:match_pair(t, 0, '{', '}') - 1]]
+    expr = t
+    m = re.match(r'([A-Za-z_][A-Za-z0-9_]*)', t)
+    if m:
+        best = None
+        for am in re.finditer(r'\bconst\s+' + re.escape(m.group(1)) + r'\s*=\s*', src):
+            if am.end() <= abs_pos:
+                best = am
+        if best:
+            rest = src[best.end():]
+            depth, cut = 0, len(rest)
+            for i, ch in enumerate(rest):        # batasi sampai akhir pernyataan
+                if ch in '([{':
+                    depth += 1
+                elif ch in ')]}':
+                    depth -= 1
+                elif ch == ';' and depth == 0:
+                    cut = i
+                    break
+            expr = rest[:cut]
+    blocks = []
+    for om in re.finditer(r'=>\s*\(?\s*\{', expr):
+        st = expr.index('{', om.start())
+        en = match_pair(expr, st, '{', '}') - 1
+        inner = expr[st + 1:en]
+        rm = re.search(r'\breturn\s*\{', inner)
+        if rm:
+            # `=> { ... return {baris} }` = badan blok. Yang jadi baris insert
+            # hanya objek setelah `return`, BUKAN objek lain di dalam blok
+            # (mis. `const modifiers = xs.map((x) => ({...}))` di atasnya).
+            rst = st + 1 + inner.index('{', rm.start())
+            ren = match_pair(expr, rst, '{', '}') - 1
+            blocks.append((st, en))
+            cands.append((rst, ren))
+            continue
+        if any(bs < st < be for bs, be in blocks):
+            continue          # objek perantara di dalam badan blok -> bukan baris
+        cands.append((st, en))
+    if not cands:
+        e = expr.lstrip()
+        if e.startswith('{'):
+            expr = e
+            cands.append((0, match_pair(e, 0, '{', '}') - 1))
+    # Buang objek yang bersarang di dalam objek lain: baris insert = objek TERLUAR.
+    # (Kalau tidak, objek di dalam `.map()` bertingkat ikut diperiksa sebagai baris.)
+    cands.sort()
+    kept = []
+    for st, en in cands:
+        if kept and st < kept[-1][1]:
+            continue
+        kept.append((st, en))
+    return [expr[st + 1:en] for st, en in kept]
+
+
+def audit_adapter(src, cols, fks, required):
     consts = resolve_constants(src)
     problems = []
     table_refs = set()
     column_checks = 0
     relation_checks = 0
+    insert_checks = 0
+    insert_skipped = 0
 
     # 1-4) rantai per `.from(...)`
     froms = list(re.finditer(r"\.from\(\s*'([a-z_]+)'\s*\)|\.from\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)", src))
@@ -159,6 +285,7 @@ def audit_adapter(src, cols, fks):
         table_refs.add(table)
         end = froms[i + 1].start() if i + 1 < len(froms) else len(src)
         chain = src[m.end():end]
+        base = m.end()
         known = cols.get(table)
         if known is None:
             problems.append(f'tabel tidak ada: "{table}"')
@@ -191,13 +318,31 @@ def audit_adapter(src, cols, fks):
                 if (rel, table) not in fks and (table, rel) not in fks:
                     problems.append(f'{table} → "{rel}" tanpa FK di kedua arah (PostgREST butuh ini)')
 
-        # kunci objek insert/update/upsert
-        for om in re.finditer(r"\.(insert|update|upsert)\(\s*\{([^{}]*)\}", chain, re.S):
-            for km in re.finditer(r'(?:^|[\s,{])([a-z_][a-z0-9_]*)\s*:', om.group(2)):
-                col = km.group(1)
-                column_checks += 1
-                if col not in known:
-                    problems.append(f'{table}.{col} (di .{om.group(1)}) tidak ada')
+        # kunci objek insert/update/upsert — termasuk yang lewat variabel/map
+        for om in re.finditer(r"\.(insert|update|upsert)\(", chain):
+            op = om.group(1)
+            arg = chain[om.end():match_pair(chain, om.end() - 1, '(', ')') - 1]
+            objs = insert_objects(arg, src, base + om.end())
+            if not objs:
+                insert_skipped += 1
+                continue
+            for body in objs:
+                entries = object_entries(body)
+                insert_checks += 1
+                for col, val in entries.items():
+                    column_checks += 1
+                    if col not in known:
+                        problems.append(f'{table}.{col} (di .{op}) tidak ada')
+                if op in ('insert', 'upsert'):
+                    req = required.get(table, set())
+                    for col in sorted(req - set(entries)):
+                        problems.append(
+                            f'{table}.{col} WAJIB diisi (not null tanpa default) '
+                            f'tapi tidak ada di .{op}')
+                    for col, val in entries.items():
+                        if col in req and (val == 'null' or val.endswith('?? null')):
+                            problems.append(
+                                f'{table}.{col} WAJIB diisi tapi nilainya bisa null: {val}')
 
         # kolom pada filter & order
         for cm in re.finditer(r"\.(eq|neq|gt|gte|lt|lte|is|in|order)\(\s*'([a-z_]+)'", chain):
@@ -216,7 +361,7 @@ def audit_adapter(src, cols, fks):
             if t not in cols:
                 problems.append(f'tabel tidak ada (via variabel di resetDemo): "{t}"')
 
-    return problems, table_refs, column_checks, relation_checks
+    return problems, table_refs, column_checks, relation_checks, insert_checks, insert_skipped
 
 
 def main():
@@ -225,13 +370,14 @@ def main():
     src = open(TARGET).read()
     print('TARGET:', os.path.relpath(TARGET, ROOT))
     print('-' * 74)
-    cols, fks, (fk_rows, total_fk, fk_luar) = boot_and_introspect()
+    cols, fks, (fk_rows, total_fk, fk_luar), required = boot_and_introspect()
     print(f'skema nyata: {len(cols)} tabel; FK {fk_rows} baris / {len(fks)} pasangan unik; '
           f'total pg_constraint {total_fk} ({fk_luar} menunjuk ke luar public)\n')
-    problems, refs, cchecks, rchecks = audit_adapter(src, cols, fks)
-    print(f'tabel dirujuk            : {len(refs)}')
-    print(f'kolom diperiksa          : {cchecks}')
-    print(f'relasi bersarang diperiksa: {rchecks}')
+    problems, refs, cchecks, rchecks, ichecks, iskip = audit_adapter(src, cols, fks, required)
+    print(f'tabel dirujuk              : {len(refs)}')
+    print(f'kolom diperiksa            : {cchecks}')
+    print(f'relasi bersarang diperiksa : {rchecks}')
+    print(f'objek insert/update diperiksa: {ichecks}  (insert dinamis dilewati: {iskip})')
     print('-' * 74)
     if problems:
         print(f'HASIL: GAGAL — {len(problems)} rujukan tidak dikenal')

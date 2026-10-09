@@ -1,79 +1,77 @@
 # M6 — Adapter Backend Skema Baru (ERD Irbid)
 
-Status: **adapter selesai & terverifikasi statis.** UI 4 portal **belum** dimigrasikan
-(keputusan sadar — lihat §8). Dokumen pendamping: `ERD.md` (skema), `openapi.yaml` (kontrak API),
-`MIGRATION-RUNBOOK.md` (cara aman pindah environment), `MILESTONES.md` (urutan kerja).
+Status: **skema baru sekarang jadi jalur DEFAULT.** Portal lama sengaja diputus (keputusan pemilik
+produk: "putus saja gapaap, agar bisa diconsume ke ui baru") — lihat §1.
 
 | | |
 |---|---|
-| Berkas | `packages/shared/src/lib/backend/irbidBackend.js` (904 baris) |
-| Saklar | `VITE_SCHEMA=irbid` — dibaca di `packages/shared/src/lib/backend/index.js` |
-| Default | **skema lama** (`supabaseBackend.js`). Produksi tidak berubah bila env kosong. |
+| Berkas | `packages/shared/src/lib/backend/irbidBackend.js` (942 baris, 33 metode) |
+| Default | **skema baru** (`VITE_SCHEMA` kosong → `irbidBackend`) |
+| Jalan pulang | `VITE_SCHEMA=legacy` → adapter skema lama (`supabaseBackend.js`) |
 | Target skema | 42 tabel hasil migrasi `supabase/migrations/0000`–`0006` |
+
+Dokumen pendamping: `ERD.md` (skema) · `openapi.yaml` (kontrak API) · `MIGRATION-RUNBOOK.md`
+(cara pindah environment) · `MILESTONES.md` (urutan kerja).
 
 ---
 
-## 1. Kenapa pakai saklar, bukan ganti langsung
+## 1. Kenapa default-nya dibalik
 
-4 portal produksi (`sa7tein-{customer,merchant,courier,cs}.vercel.app`) masih membaca skema lama
-(`profiles`, `restaurants`, `menu_items`, `order_messages`, `settings`) dan satu blob `orders.data`
-(jsonb). Mengganti adapter secara langsung akan mematikan keempatnya sebelum UI dimigrasikan.
+Sebelumnya adapter skema baru hanya aktif lewat `VITE_SCHEMA=irbid` supaya 4 portal produksi
+(`sa7tein-{customer,merchant,courier,cs}.vercel.app`) yang masih membaca skema lama tidak mati.
+Pemilik produk memutuskan sebaliknya: **skema baru yang diprioritaskan**, portal lama boleh putus.
 
-Karena itu `getBackend()` memilih adapter berdasarkan env:
+Konsekuensi yang diterima (dan sudah diperhitungkan):
+
+- 4 portal lama **tidak lagi cocok** dengan bentuk data yang dikembalikan adapter: mereka membaca
+  nama field skema lama (`subtotal`, `courierCost`, `restaurantId`, `price`, `status` berbahasa
+  lama) dan memformat Rupiah. Gejala paling terlihat: harga tampil sebagai `Rp NaN`.
+- Build keempatnya **tetap sukses** (tidak ada error kompilasi) — jadi ini kegagalan runtime yang
+  disengaja, bukan build rusak.
+- `VITE_SCHEMA=legacy` tetap disediakan sebagai jalan pulang, bukan lagi syarat memakai skema baru.
 
 ```js
-const TARGET_SCHEMA = import.meta.env.VITE_SCHEMA === 'irbid' ? 'irbid' : 'legacy';
+const TARGET_SCHEMA = import.meta.env.VITE_SCHEMA === 'legacy' ? 'legacy' : 'irbid';
 
 export function getBackend() {
   if (!isSupabaseConfigured) return localBackend;          // mode demo lokal
-  return TARGET_SCHEMA === 'irbid' ? irbidBackend : supabaseBackend;
+  return TARGET_SCHEMA === 'legacy' ? supabaseBackend : irbidBackend;
 }
-export function getBackendMode()   { /* 'supabase' | 'local' */ }
-export function getTargetSchema()  { /* 'irbid' | 'legacy' | 'local' */ }
 ```
-
-Nilai lain/kosong untuk `VITE_SCHEMA` → `legacy`. Tidak ada jalur lain yang bisa mengaktifkan
-skema baru, jadi risiko tanpa sengaja menyalakannya di produksi = nol.
 
 > Bentuk `import.meta.env.VITE_SCHEMA` ditulis **tanpa optional chaining**. Versi pertama saya
 > memakai `import.meta.env?.VITE_SCHEMA`, dan itu membuat Vite tidak menyubstitusi nilainya jadi
-> literal — Rollup lalu tidak bisa membuang adapter yang tidak dipakai (lihat §2).
+> literal — Rollup lalu tidak bisa membuang adapter yang tidak dipakai (kedua adapter ikut
+> terkirim ke bundle).
 
 ## 2. Bukti saklar bekerja (bukan asumsi)
 
-Diuji dengan env Supabase dummy supaya jalur Supabase benar-benar aktif, `dist/` dibersihkan dulu,
-lalu bundle diperiksa dari penanda khas masing-masing adapter
-(`order_messages` hanya ada di adapter lama; `phone_verifications` hanya di adapter baru):
+Env Supabase dummy dipakai supaya jalur Supabase benar-benar aktif, `dist/` dibersihkan dulu, lalu
+bundle diperiksa lewat penanda khas tiap adapter (`order_messages` hanya di adapter lama,
+`phone_verifications` hanya di adapter baru):
 
-| Build | Bundle `dist/assets` | `phone_verifications` (baru) | `order_messages` (lama) |
+| Build | Bundle | `phone_verifications` (baru) | `order_messages` (lama) |
 |---|---|---|---|
-| `npm run build:merchant` | 660 KB | **0** | 4 |
-| `VITE_SCHEMA=irbid npm run build:merchant` | 668 KB | 4 | **0** |
+| default (tanpa `VITE_SCHEMA`) | **668 KB** | **4** | 0 |
+| `VITE_SCHEMA=legacy` | **660 KB** | 0 | **4** |
 
-Artinya adapter yang tidak terpakai benar-benar dibuang dari bundle:
-
-- **Produksi tidak membesar sama sekali** — bundle legacy tetap 660 KB, tanpa kode adapter baru.
-- Adapter skema baru hanya menambah ~8 KB pada build `irbid`.
+Jadi adapter yang tidak dipakai benar-benar dibuang dari bundle — bukan sekadar tidak dipanggil.
 
 ## 3. Permukaan API
 
 | | jumlah |
 |---|---|
-| Metode di `supabaseBackend` / `localBackend` (kontrak UI saat ini) | 31 |
-| Metode di `irbidBackend` | 33 |
-| Metode yang **benar-benar dipanggil** `apps/*/src` | 19 |
+| Metode di adapter skema baru | 33 |
+| Metode yang dipanggil `apps/*/src` | 19 (semuanya ada) |
+| Metode tambahan (superset) | 3: `getOrder`, `ensureChat`, `onCouriersChange` |
 
-- **19/19 metode yang dipanggil UI ada** di `irbidBackend` (dicek dengan mengekstrak
-  `getBackend().x()` dan `backend.x()` dari seluruh `apps/*/src`).
-- 3 metode **tambahan** (superset, tidak memecahkan apa pun): `getOrder`, `ensureChat`,
-  `onCouriersChange`.
-- `fetchProfile` **tidak** ada di adapter baru. Metode itu hanya dipakai internal
-  `supabaseBackend.js` (bukan bagian kontrak UI), dan fungsinya digantikan `loadUserRow()`.
+`fetchProfile` hanya dipakai internal `supabaseBackend.js` (bukan bagian kontrak yang dipanggil UI)
+dan fungsinya digantikan `loadUserRow()`.
 
 ## 4. Mapping metode → tabel
 
-Dihasilkan otomatis dari kode (bukan ditulis manual) agar tidak ada tabel yang salah sebut.
-Kolom kosong = metode memakai helper/realtime, lihat catatan di bawah tabel.
+Dihasilkan otomatis dari kode agar tidak ada tabel yang salah sebut. Baris kosong = metode memakai
+helper/realtime (catatan di bawah tabel).
 
 | Metode | Tabel |
 |---|---|
@@ -84,42 +82,65 @@ Kolom kosong = metode memakai helper/realtime, lihat catatan di bawah tabel.
 | `getMerchants`, `updateMerchant`, `getStoreStatus` | `merchants` |
 | `setStoreStatus` | `merchants`, `orders` |
 | `getMenu`, `saveMenu`, `updateStock` | `menus` |
-| `getCouriers`, `updateCourier`, `updateCourierLocation` | `couriers` |
-| `createOrder` | `menus`, `orders`, `order_items` |
+| `getCouriers`, `updateCourier`, `updateCourierLocation` | `couriers` (+ embed `users`) |
+| `createOrder` | `menus`, `orders`, `order_items`, `addresses` |
 | `getOrder`, `getOrders`, `claimOrder` | `orders` |
 | `updateOrderStatus` | `orders`, `order_items` |
-| `ensureChat` | `chats`, `chat_participants` |
+| `ensureChat` | `chats`, `chat_participants`, `users` |
 | `getMessages` | `chats`, `chat_messages` |
 | `sendMessage` | `chat_messages`, `chats` |
 | `resetDemo` | 32 tabel (daftar eksplisit, urut anak → induk) |
-| `onMerchantsChange`, `onStoreStatusChange`, `onMenuChange`, `onCouriersChange`, `onOrdersChange`, `onCourierLocation`, `onMessagesChange` | realtime, tanpa `.from()` — lihat di bawah |
+| `on*Change` (7 metode) | realtime, tanpa `.from()` |
 
-- Helper menambah tabel di luar tabel pemanggilnya: `loadUserRow()` → `users`;
-  `ensureWallet()` → `wallets`; `ensureSeed()` → `merchants`, `users`, `menus`, `couriers`.
+- Helper menambah tabel di luar tabel pemanggilnya: `loadUserRow()` → `users`; `ensureWallet()`
+  → `wallets`; `resolveDeliveryAddress()` → `addresses`; `ensureSeed()` → `merchants`, `users`,
+  `menus`, `couriers`.
 - Kanal realtime (`postgres_changes`): `merchants`, `menus`, `couriers`, `orders`, `chat_messages`.
-- Baca bersarang (embed PostgREST, bukan `.from()`): `order_items`, `merchants`, `couriers`,
-  `customers`, `addresses`, `menu_variants`, `users` (sebagai `sender`).
+- Baca bersarang (embed PostgREST): `order_items`, `merchants`, `couriers`, `customers`,
+  `addresses`, `menu_variants`, `users` (sebagai `sender` dan untuk `couriers.phone`).
 
 ### Cakupan tabel
 
-42 tabel ada di DDL; adapter menyebut **32** sebagai sasaran query. Sisa **10** tidak pernah
-disentuh, dan satu di antaranya tetap dibaca lewat embed:
-
-- dibaca via embed, bukan `.from()`: `menu_variants`
-- benar-benar belum dipakai: `cashback_tiers`, `exchange_rates`, `marketing`, `operators`,
-  `platform_profit`, `platform_switches`, `roles`, `tax_reports`, `zones`
+42 tabel ada di DDL; adapter menyebut **32** sebagai sasaran query. Sisa 10 tidak pernah jadi sasaran
+query; `menu_variants` tetap dibaca lewat embed, 9 benar-benar belum dipakai: `cashback_tiers`,
+`exchange_rates`, `marketing`, `operators`, `platform_profit`, `platform_switches`, `roles`,
+`tax_reports`, `zones`.
 
 Catatan: `zone_code` yang dikembalikan adapter adalah **kolom `orders`**, bukan query ke tabel
 `zones`. Jadi `zones` memang belum dipakai aplikasi (belum ada gerbang zona).
 
-## 5. Mapping nilai
+## 5. Bentuk data: satu nama per konsep
 
-### Status pesanan — ⚠️ UNRESOLVED OST-1
+Adapter mengembalikan **camelCase dari kolom ERD**, tanpa alias warisan. Sebelumnya ada nama kembar
+(`subtotal` + `subTotalJod`, `courierCost` + `deliveryFeeJod`, status lama + `statusNew`) karena 4
+portal lama belum dimigrasikan — alasan itu sudah tidak ada.
 
-Enum baru (8 nilai) **tidak bisa** membedakan seluruh status lama (9 nilai). Mapping terpaksa
-**menyusutkan** dua status lama jadi satu:
+Padanan utama:
 
-| Lama | Baru | Catatan |
+| Kolom ERD | Kunci yang dikembalikan |
+|---|---|
+| `orders.sub_total_jod` | `subTotalJod` |
+| `orders.delivery_fee_jod` | `deliveryFeeJod` |
+| `orders.total_jod` / `total_idr` | `totalJod` / `totalIdr` |
+| `orders.delivery_address_id` + embed `addresses` | `deliveryAddressId`, `deliveryAddress`, `deliveryLat`, `deliveryLng` |
+| `orders.merchant_id` + embed `merchants` | `merchantId`, `merchantName`, `merchantLat`, … |
+| `orders.zone_code` / `zone_id` | `zoneCode` / `zoneId` |
+| `orders.payment_method` | `paymentMethod` |
+| `orders.hold_status` | `holdStatus` |
+| `menus.price_jod` | `priceJod` |
+| `couriers.availability` | `availability` |
+| `users.phone` (embed dari `couriers`) | `phone` |
+
+**Masukan** tetap longgar di dua tempat saja, dan itu disengaja: status (`toNewStatus`, lihat §6) dan
+pembayaran (`wallet` → `xendit_qris`, karena `wallet` bukan nilai yang diizinkan check constraint).
+Selain itu masukan memakai nama kanonik (`menuId`, `merchantId`, `deliveryFeeJod`, …).
+
+## 6. Status pesanan — ⚠️ UNRESOLVED OST-1
+
+Yang **dikembalikan** adapter selalu status skema baru (8 nilai). Yang **diterima** masih boleh
+status skema lama, karena kosakata status baru tidak bisa membedakan semuanya:
+
+| Lama (diterima) | Baru (dikeluarkan) | Catatan |
 |---|---|---|
 | `pending` | `quotation` | |
 | `accepted` | `prepare` | ⚠️ menyusut |
@@ -128,94 +149,113 @@ Enum baru (8 nilai) **tidak bisa** membedakan seluruh status lama (9 nilai). Map
 | `picked_up` | `waitingDelivery` | |
 | `on_the_way` | `delivery` | |
 | `delivered` | `done` | |
-| `rejected` | `canceled` | |
-| `cancelled` | `canceled` | |
+| `rejected` / `cancelled` | `canceled` | |
 
-Konsekuensi: order yang sudah `accepted` lalu dibaca kembali akan tampil sebagai `preparing` di UI
-lama, karena informasi aslinya hilang. Ini **butuh keputusan PO** (`docs/backend/ERD.md` §8,
-item OST-1): tambahkan nilai status ke-9, atau terima penyusutan ini secara resmi.
-
-### Pembayaran
-
-`wallet` → `xendit_qris`; `cod` → `cod`; `transfer` → `transfer`.
-
-## 6. Bentuk objek: nama lama **dan** baru sekaligus
-
-Adapter mengembalikan kedua penamaan, mis. `subtotal` + `subTotalJod`, `courierCost` +
-`zoneCode`, status legacy + `statusNew`. Tujuannya: data layer bisa ditukar lebih dulu tanpa
-memecah layar yang belum dimigrasikan. `statusNew` selalu berisi status skema baru yang sebenarnya.
-
-Saat UI dimigrasikan ke JOD/skema baru, field lama dihapus dan `statusNew` di-rename jadi `status`.
+Konsekuensi: order yang pernah `accepted` akan terbaca `prepare` saat dimuat ulang — informasi
+aslinya hilang. Ini **butuh keputusan PO** (`ERD.md` §8, OST-1).
 
 ## 7. Verifikasi (semua bisa dijalankan ulang)
 
 ```bash
-npm run build            # 4 portal, hasil: 4 build sukses
-npm run db:audit-backend # tabel/kolom/relasi adapter vs skema NYATA
-npm run db:verify        # migrasi + constraint + RLS
-npm run db:e2e           # alur bisnis end-to-end
-npm run api:audit        # kontrak OpenAPI vs sumber 1:1
+npm run build              # 4 portal, hasil: 4 build sukses
+npm run db:audit-backend   # tabel/kolom/relasi/insert adapter vs skema NYATA
+npm run db:verify          # migrasi + constraint + append-only + RLS
+npm run db:e2e             # alur bisnis end-to-end (26 pemeriksaan)
+npm run api:audit          # kontrak OpenAPI vs sumber 1:1
 ```
 
 Hasil terakhir: semuanya LULUS.
 
-- `db:audit-backend` — membangun Postgres sementara dari `supabase/migrations/0000`–`0006`,
-  membaca `information_schema`, lalu memastikan setiap `.from('tabel')`, setiap kolom di
-  `.select(...)`/filter/`insert`/`update`, dan setiap relasi bersarang benar-benar ada.
-  **Bukan sekadar "kodenya jalan"** — PostgREST tidak punya type-check, jadi salah nama kolom
-  normalnya baru ketahuan saat runtime di depan user.
-  Hasil: 42 tabel; FK 63 baris / 60 pasangan unik (1 menunjuk ke luar skema `public`);
-  **32 tabel dirujuk, 112 kolom diperiksa, 15 relasi bersarang diperiksa — 0 rujukan tidak dikenal.**
-- `db:e2e` — 26 pemeriksaan (naik dari 23; +3 skenario S10, lihat §9).
+`db:audit-backend` membangun Postgres sementara dari `supabase/migrations/0000`–`0006`, membaca
+`information_schema`, lalu memeriksa:
 
-## 8. Batas yang disengaja (jangan dianggap selesai)
+1. setiap `.from('tabel')` ada;
+2. setiap kolom di `.select(...)`, filter, dan `order` ada (termasuk embed bertingkat);
+3. setiap relasi bersarang punya FK yang cocok (dua arah);
+4. kunci objek `.insert/.update/.upsert` ada sebagai kolom — **termasuk** objek yang ditampung
+   variabel (`const row = {...}`) atau dibangun `.map((x) => ({...}))`;
+5. `.insert`/`.upsert` mengisi semua kolom **NOT NULL tanpa default**, dan nilainya tidak boleh
+   `null` atau `... ?? null`;
+6. daftar tabel `resetDemo()` ada.
 
-1. **Mata uang.** Nilai uang kini JOD (mis. `price_jod numeric(12,3)`), sedangkan UI masih
-   memformat Rupiah lewat `formatRupiah` di `packages/shared/src/lib/geo.js:69`, dipakai **14
-   berkas** di keempat portal. Selama pass UI JOD belum dikerjakan, **angka yang tampil salah**
-   (5.000 JOD tampil sebagai "Rp 5.000"). Ini pekerjaan M6 lanjutan.
-2. **Reserve/hold belum dibuat saat order.** UI wallet belum ada, dan customer demo belum punya
-   saldo, jadi `createOrder` tidak membuat baris `wallet_holds`/`wallet_ledgers` untuk menahan
-   dana. Alur top-up + reserve menyusul bersama UI wallet.
-3. **Gerbang zona belum ada.** `zones` belum dipakai; `orders.zone_code` diisi apa adanya.
-4. **UI belum memakai field baru.** `subTotalJod`, `zoneCode`, `holdStatus`, `statusNew` belum
-   dirujuk satu pun oleh `apps/*/src` (dicek dengan pencarian). Jadi semua perbaikan tipe data di
-   atas belum terpakai di layar.
+Hasil: 42 tabel; FK 63 baris / 60 pasangan unik; **32 tabel dirujuk, 195 kolom diperiksa,
+17 relasi bersarang, 29 objek insert/update (0 insert dilewati) — 0 rujukan tidak dikenal.**
 
-## 9. Bug yang ditemukan & diperbaiki di milestone ini
+## 8. Bug nyata yang ditemukan & ditutup (semua lewat pemeriksaan, bukan dugaan)
 
-**`resetDemo()` tidak pernah berhasil.** Penjaga append-only (migrasi `0006`) menolak `DELETE`
-pada `wallet_ledgers` dan `audit_logs` untuk **semua peran** — dan karena FK, menghapus tabel
-induknya (`wallets`) ikut terblokir. Loop lama mengeksekusi delete berurutan tanpa pemeriksaan
-awal, jadi ia melempar error di tengah jalan dan **meninggalkan demo setengah terhapus** (chat
-hilang, order masih ada).
-
-Perbaikan: preflight menghitung `wallet_ledgers` dan `audit_logs` **sebelum** menghapus satu baris
-pun. Bila salah satunya berisi data, `resetDemo()` berhenti dengan pesan yang menjelaskan sebabnya
-dan menyebut langkah alternatif — tanpa mengubah data apa pun. Bila keduanya kosong, reset berjalan
-seperti biasa.
-
-Premis perbaikannya diuji empiris sebagai skenario E2E **S10** (3 pemeriksaan):
-
-- `DELETE` yang cocok 0 baris pada tabel append-only **diizinkan** (trigger row tidak menyala);
-- `TRUNCATE` pada `audit_logs` **ditolak**;
-- `DELETE` pada ledger yang **berisi** **ditolak** (jadi preflight memang diperlukan).
-
-## 10. Keputusan yang menunggu PO
-
-| # | Hal | Pilihan |
+| # | Bug | Akibat kalau dibiarkan |
 |---|---|---|
-| 1 | **OST-1** — status 9 → 8 nilai | tambah nilai ke-9, atau terima penyusutan `accepted`+`preparing`→`prepare` |
-| 2 | 4 kolom legacy tanpa padanan di draft: `merchants.emoji`, `merchants.category`, `menus.stock`, `menus.category` | tambahkan ke skema, atau buang fiturnya. Sementara: `emoji` diisi `🍽️`, `category` null, `stock` dibiarkan null (UI masih membacanya) |
-| 3 | Nama entitas bentrok: draft `incidentResolution` vs flows `incident_resolutions` **dan** `disputes` | saat ini dipakai `disputes` |
-| 4 | Kebijakan reset demo: jejak uang/audit tidak boleh dihapus | biarkan seperti sekarang (butuh DB bersih), atau sediakan jalur maintenance khusus |
+| 1 | `createOrder` mengirim `delivery_address_id: null` padahal kolomnya NOT NULL | **setiap pembuatan order gagal**; diperbaiki: pakai `deliveryAddressId` → alamat default customer → bikin dari koordinat → kalau kosong, gagal dengan pesan jelas |
+| 2 | `menus.photo` **tidak ada** di skema (hanya `image`) | `saveMenu` + `ensureSeed` gagal (PGRST204) |
+| 3 | `chat_participants.role` NOT NULL tapi upsert hanya mengisi `chat_id`/`user_id` | pembuatan chat gagal; sekarang peran dibaca dari `users` (bukan ditebak) |
+| 4 | `chat_messages.sender_id: me?.id ?? null` | kirim pesan tanpa sesi → pelanggaran NOT NULL; sekarang gagal dengan pesan jelas |
+| 5 | Harga bisa datang dari klien (`i.price`) kalau menu tidak ketemu | **harga bisa dipalsukan pemanggil**; sekarang snapshot wajib dari `menus`, kalau tidak ada → order dibatalkan |
+| 6 | `couriers.phone` di-hardcode `''` | data tidak ada padahal nomornya nyata di `users.phone`; sekarang di-embed |
+| 7 | `merchants.store_phone` tidak punya jalur tulis | kolom wajib PRD (E.164) tidak pernah terisi; sekarang `updateMerchant` menerimanya |
+| 8 | `resetDemo()` melempar error di tengah loop | demo tertinggal **setengah terhapus** (chat hilang, order masih ada); sekarang ada preflight yang gagal sebelum menghapus apa pun |
+| 9 | `wallet_ledgers` tidak append-only | ditemukan E2E S8, ditutup migrasi `0006` |
 
-## 11. Langkah berikutnya (M6 lanjutan → M8)
+### Auditor-nya sendiri sempat salah (dan itu diperbaiki + diuji)
 
-1. Pass UI JOD: ganti `formatRupiah` di 14 berkas (atau buat `formatMoney` sadar-mata-uang).
-2. Migrasikan layar satu per satu ke field baru, lalu hapus field lama dari mapper.
-3. UI wallet (top-up, reserve saat checkout, riwayat ledger).
-4. Gerbang zona saat checkout.
-5. Setelah 1–4 selesai: staging Supabase → E2E 4 portal → baru produksi
-   (`MIGRATION-RUNBOOK.md` §5). **Jangan** menjalankan migrasi ke project Supabase produksi
-   sebelum staging lolos.
+`menus.photo` **lolos** dari audit pertama karena pemeriksa kunci objek hanya melihat bentuk
+`.insert({...})` langsung — sedangkan `saveMenu` memakai `.map((x) => ({...}))` dan `createOrder`
+memakai `const row = {...}`. Empat bug di auditor yang ditemukan & ditutup:
+
+1. objek lewat variabel/`.map()` tidak diperiksa (penyebab `menus.photo` lolos);
+2. `const NAME =` diambil dari kemunculan **pertama di seluruh berkas**, bukan yang terdekat
+   sebelum pemanggilan → kolom tabel lain ikut dilaporkan;
+3. objek perantara di dalam badan blok (`=> { const modifiers = xs.map((x) => ({...})) ... }`) ikut
+   dianggap baris insert;
+4. komentar `// ...` setelah koma membuat bagian berikutnya terbuang → kunci seperti `qty` hilang.
+
+Agar tidak sekadar "lulus", auditor **diuji mutasi**: dua bug yang sudah diperbaiki disuntikkan
+kembali ke salinan sementara (`AUDIT_TARGET=/tmp/mutN.js`), dan keduanya **dilaporkan tepat**:
+
+```
+✗ menus.photo (di .insert) tidak ada
+✗ orders.delivery_address_id WAJIB diisi tapi nilainya bisa null: order.deliveryAddressId ?? null
+```
+
+## 9. Batas yang disengaja / belum selesai
+
+1. **Reserve/hold belum dibuat saat order.** `createOrder` menulis `hold_status: 'none'` dan tidak
+   membuat baris `wallet_holds`/`wallet_ledgers`, karena customer demo belum punya saldo dan UI
+   wallet belum ada. Jadi model uang "reserve saat order → settle saat `done`" (ERD) belum berjalan
+   di adapter, walau migrasi + E2E sudah membuktikan mekanismenya bisa.
+2. **Gerbang zona belum ada.** `zones` belum dipakai; `orders.zone_code` diisi apa adanya.
+3. **Tidak ada timestamp per-status.** Tabel `orders` hanya punya `created_at`, `placed_at`,
+   `paid_at`, jadi `statusTimestamps` (dipakai timeline/ETA UI lama) tidak diisi. Kalau UI butuh,
+   ini perlu kolom baru (keputusan produk).
+4. **Mode demo lokal masih skema lama.** `localBackend.js` (dipakai bila Supabase kosong) tetap
+   berbentuk skema lama. Jadi jalur "tanpa Supabase" tidak setara dengan default baru.
+
+## 10. Yang menghalangi konsumsi oleh UI baru (butuh keputusan produk)
+
+UI baru (`/Users/muhammadbaihaqy/Downloads/za7tein-pwa`) **belum punya lapisan API sama sekali** —
+itu keputusan sadar repo tersebut (`AGENTS.md`: *"Jangan merasa ada yang kurang lalu mulai membuat
+lapisan API: ketiadaan integrasi itu keputusan sadar"*). Jadi yang perlu disiapkan bukan sekadar
+adapter, tetapi **tiga ketidakcocokan kontrak** berikut. Semuanya keputusan produk, bukan sesuatu
+yang boleh ditebak di adapter:
+
+| # | Hal | ERD / backend sekarang | UI baru (kode aktual) |
+|---|---|---|---|
+| 1 | **Mata uang** | nilai uang disimpan **JOD** (`_jod numeric(12,3)`), IDR untuk settlement | **IDR = sumber kebenaran**, JOD hanya tampilan (`R-CURR-01`, kurs mock 1 JOD = Rp23.000, JOD 2 desimal) — `src/data/currency.ts` |
+| 2 | **Status pesanan** | kosakata Inggris: `cart/quotation/prepare/waitingCourier/waitingDelivery/delivery/done/canceled` | kosakata Indonesia: `masuk/diterima/dimasak/diantar/tiba/selesai/ditolak/batal` — `MerchantOrderStatus`, `src/types.ts` |
+| 3 | **Format id** | `bigint identity` (1, 2, 3, …) | string ber-prefix: `sa-…`/`cus-1`/`am-1`/`mm-1`/`mo-1`/`cr-1` |
+
+Catatan tambahan: UI baru memakai `holdStatus` = `none/held/cut/settled/released` (model lama),
+sedangkan keputusan PO 2026-09-25 (yang dipakai ERD) menghapus tahap `cut` →
+`none/reserved/settled/released`. **ERD mengikuti keputusan terbaru; UI baru masih memakai model
+lama.** Perlu diselaraskan sebelum integrasi.
+
+Sampai tiga hal di atas diputuskan, integrasi UI baru tidak bisa "tinggal sambung".
+
+## 11. Langkah berikutnya
+
+1. Putuskan §10 (mata uang, kosakata status, format id) — ini menentukan apakah ERD/`openapi.yaml`
+   perlu diubah atau UI baru yang menyesuaikan.
+2. Lengkapi jalur uang di adapter: top-up + reserve saat checkout + settle saat `done`
+   (`wallet_holds` + `wallet_ledgers` sudah ada dan sudah terbukti di E2E).
+3. Gerbang zona saat checkout.
+4. Kalau portal lama masih dibutuhkan sebagai demo: jalankan dengan `VITE_SCHEMA=legacy`, atau
+   migrasikan layarnya ke bentuk baru.

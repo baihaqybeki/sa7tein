@@ -38,7 +38,7 @@ Keputusan PO 2026-10-09 (menyimpang dari catatan sebelumnya, dicatat eksplisit):
 | M3 | ✅ selesai | `supabase/migrations/0002_order_money.sql` (18 tabel) |
 | M4 | ✅ selesai | `supabase/migrations/0003_ops_platform.sql` (14 tabel) |
 | M5 | ✅ selesai | `0004_indexes_rls_realtime.sql` + `0005_seed_irbid.sql` + `0006_append_only_guards.sql` — RLS **42/42**, 59 policy, 11 tabel realtime, seed JOD, penjaga append-only |
-| M6 | 🟡 **sebagian** — adapter selesai, DoD belum | `packages/shared/src/lib/backend/irbidBackend.js` (904 baris, 33 metode) + saklar `VITE_SCHEMA=irbid` di `index.js`. Audit skema: **32 tabel / 112 kolom / 15 relasi, 0 rujukan tidak dikenal**. **DoD M6 belum terpenuhi**: UI 4 portal belum membaca kolom baru (mata uang JOD, UI wallet, gerbang zona) — lihat `docs/backend/M6-ADAPTER.md` §8 |
+| M6 | 🟡 **sebagian** — adapter jadi DEFAULT | `irbidBackend.js` (942 baris, 33 metode). Skema baru = default; `VITE_SCHEMA=legacy` jadi jalan pulang. **4 portal lama sengaja diputus** (keputusan pemilik produk). Audit skema: 32 tabel / 195 kolom / 17 relasi / 29 objek insert, 0 rujukan tidak dikenal (auditor diuji mutasi). **DoD belum**: reserve/hold, gerbang zona, timestamp per-status belum ada; UI baru belum cocok (mata uang, kosakata status, format id) — `docs/backend/M6-ADAPTER.md` §9–§10 |
 | M7 | 🟡 draft | `docs/backend/openapi.yaml` — 68 path / 83 operasi, audit 1:1 **LULUS**; final menyusul setelah M6 |
 | M8 | 🟡 sebagian | `MIGRATION-RUNBOOK.md` ✅ · selaraskan SRS/FSD + deploy ulang ⛔ |
 
@@ -52,10 +52,14 @@ npm run db:audit-backend     # tabel/kolom/relasi yang dirujuk adapter benar-ben
 npm run api:audit            # audit 1:1 kontrak API vs sumber spek
 ```
 
-Yang **belum** dikerjakan dan alasannya: sisa **M6** (UI JOD, UI wallet, gerbang zona) dan
-deploy ulang pada M8 sengaja ditahan supaya 4 portal produksi tidak mati di tengah jalan —
-urutannya ada di `MIGRATION-RUNBOOK.md` §5. Adapter baru hanya aktif bila `VITE_SCHEMA=irbid`, jadi
-build produksi saat ini **tidak berubah sedikit pun** (dibuktikan di `M6-ADAPTER.md` §2).
+Yang **belum** dikerjakan dan alasannya: sisa **M6** (reserve/hold, gerbang zona, timestamp
+per-status) dan deploy ulang pada M8.
+
+⚠️ **Sejak 2026-10-09 skema baru jadi DEFAULT** (permintaan pemilik produk: portal lama boleh
+putus supaya skema baru bisa dikonsumsi). Jadi **4 portal lama tidak lagi cocok** dengan bentuk
+data yang dikembalikan adapter — build tetap sukses, tapi datanya salah (mis. `Rp NaN`).
+Jalan pulang: `VITE_SCHEMA=legacy`. Sebelum deploy ulang ke produksi, lihat
+`MIGRATION-RUNBOOK.md` §5.
 
 ## Aturan main (dari `schema-draft-v1.md`, tidak boleh dilanggar)
 
@@ -79,7 +83,7 @@ build produksi saat ini **tidak berubah sedikit pun** (dibuktikan di `M6-ADAPTER
 | **M3** | **DB fase 2 — order & uang** | M2 | Tabel `orders`, `order_items`, `batches`, `wallets`, `wallet_holds`, `wallet_ledgers`, `topups`, `cashouts`, `merchant_credit`, `disputes`, `protection_fund`, `exchange_rates`; hold lifecycle `none/reserved/settled/released`; ledger append-only + double-entry lulus | `supabase/migrations/00X_*.sql` |
 | **M4** | **DB fase 3 — ops & platform** | M3 | Tabel `chats`, `chat_messages`, `incident_resolutions`, `rating_reviews`, `review_replies`, `marketing`, `push_subscriptions`, `checkpoints`, `operators`, `roles`, `audit_logs`, `tax_reports`, `platform_profit`, `platform_switches` lulus | `supabase/migrations/00X_*.sql` |
 | **M5** | **Constraint, index, RLS, realtime, seed** | M4 | Index untuk query panas (order by merchant/status, ledger by user, chat by order); RLS per peran (bukan permissive); realtime publication dipilih sadar (bukan semua tabel); seed Irbid JOD (merchant + menu + zone + kurir) | `supabase/migrations/00X_*.sql` + `scripts/seed-supabase.mjs` |
-| **M6** | **Adapter backend → tabel ternormalisasi** | M5 | `supabaseBackend.js` + `localBackend.js` membaca/menulis tabel baru; `orders.data` JSONB **dihapus**; semua method adapter punya pemetaan ke kolom; 4 portal berjalan di atas skema baru | `packages/shared/src/lib/backend/*.js` |
+| **M6** | **Adapter backend → tabel ternormalisasi** | M5 | `irbidBackend.js` membaca/menulis tabel baru dan menjadi **default**; `orders.data` JSONB dihapus; semua method adapter punya pemetaan ke kolom. **DoD direvisi 2026-10-09**: bukan lagi "4 portal lama berjalan", tetapi "skema baru bisa dikonsumsi UI baru" — portal lama boleh putus (`M6-ADAPTER.md` §1) | `packages/shared/src/lib/backend/*.js` |
 | **M7** | **API spec (REST + Realtime)** | M5 | Kontrak endpoint lengkap: auth, resource, event realtime, format error, idempotency, pagination, webhook Xendit, aturan otorisasi per peran; setiap endpoint memetakan `event → entity`; item tanpa sumber ditandai `UNRESOLVED` | `docs/backend/API-SPEC.md` |
 | **M8** | **Verifikasi & handover** | M6, M7 | Runbook migrasi (backup → apply → seed → verifikasi); uji E2E 4 portal di atas skema baru; `docs/SRS.md`/`FSD.md` + Word doc diselaraskan; deploy ulang Vercel | `docs/backend/MIGRATION-RUNBOOK.md` + docs tersinkron |
 

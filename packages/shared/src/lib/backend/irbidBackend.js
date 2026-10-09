@@ -1,26 +1,29 @@
 // ============================================================
-//  Backend Supabase — SKEMA BARU (ERD Irbid, 42 tabel) — M6
+//  Backend Supabase — SKEMA BARU (ERD Irbid, 42 tabel)
 //
 //  Adapter ini menulis & membaca tabel ternormalisasi (docs/backend/ERD.md),
-//  BUKAN lagi `orders.data` (jsonb) atau `profiles`/`settings`.
+//  BUKAN `orders.data` (jsonb) atau `profiles`/`settings`.
 //
-//  Aktif hanya bila `VITE_SCHEMA=irbid` (lihat lib/backend/index.js), supaya
-//  4 portal produksi yang masih memakai skema lama tidak ikut berubah.
+//  STATUS: ini adapter DEFAULT (lib/backend/index.js). Sesuai keputusan pemilik
+//  produk, 4 portal lama boleh putus supaya skema baru bisa dikonsumsi.
+//  `VITE_SCHEMA=legacy` mengembalikan ke adapter skema lama.
 //
-//  Bentuk objek yang dikembalikan SENGAJA tetap memuat nama field lama
-//  (subtotal, courierCost, restaurantId, status legacy, …) sekaligus field
-//  baru (subTotalJod, zoneCode, holdStatus, …). Alasannya: UI 4 portal belum
-//  dimigrasikan, jadi data layer bisa ditukar lebih dulu tanpa memecah layar.
-//  Kolom `statusNew` selalu berisi status skema baru yang sebenarnya.
+//  BENTUK DATA = satu nama per konsep (camelCase dari kolom ERD), TANPA alias
+//  warisan skema lama. Sebelumnya ada nama kembar (subtotal + subTotalJod, dst)
+//  justru karena 4 portal lama belum dimigrasikan; alasan itu sudah tidak ada.
+//  Padanan kolom: `sub_total_jod` -> `subTotalJod`, `merchant_id` -> `merchantId`.
 //
-//  CATATAN PENTING (jangan dianggap selesai):
-//   • OST-1 — enum status baru (8 nilai) TIDAK bisa membedakan seluruh status
-//     lama (9 nilai). Mapping di bawah bersifat MENYUSUTKAN: 'accepted' dan
-//     'preparing' sama-sama menjadi 'prepare'. Perlu keputusan PO.
-//   • Mata uang: nilai uang kini JOD. UI masih memformat Rupiah → tampilan
-//     salah sampai pass UI JOD dikerjakan (bagian dari M6 lanjutan / M8).
-//   • Reserve/hold (wallet) belum dibuat otomatis saat order: customer demo
-//     belum punya saldo. Jalur top-up + reserve menyusul bersama UI wallet.
+//  MASIH TERBUKA (jangan dianggap selesai):
+//   • OST-1 — menulis masih menerima status skema lama (lihat LEGACY_TO_NEW),
+//     tetapi yang DIKEMBALIKAN selalu status skema baru. Kosakata status baru
+//     (8 nilai) tidak bisa membedakan 9 status lama -> perlu keputusan PO.
+//   • Mata uang: nilai uang tersimpan JOD. UI baru (za7tein-pwa) menyimpan IDR
+//     sebagai sumber kebenaran dengan JOD hanya untuk tampilan -> belum cocok.
+//   • UI baru memakai status berbahasa Indonesia ('masuk','dimasak', ...),
+//     sedangkan ERD memakai kosakata Inggris ('quotation','prepare', ...).
+//   • UI baru memakai id string ber-prefix ('am-1','cus-1'), ERD memakai bigint.
+//   Ketiga hal terakhir adalah keputusan produk, BUKAN sesuatu yang boleh ditebak
+//   di adapter. Rinciannya di docs/backend/M6-ADAPTER.md §8.
 // ============================================================
 import { supabase } from '../supabaseClient.js';
 import { seedCouriers, seedMenu, seedMerchants } from '../../data/seed.js';
@@ -34,10 +37,11 @@ const toMs = (ts) => (ts ? new Date(ts).getTime() : null);
 const toIso = (ms) => (ms ? new Date(ms).toISOString() : null);
 
 // ------------------------------------------------------------
-//  Mapping status — legacy (UI sekarang) ↔ skema baru (ERD)
-//  Sumber status baru: docs/backend/ERD.md §4 (orders.status)
-//  Sumber status lama : repo referensi §2 (pending…cancelled)
-//  UNRESOLVED OST-1: 9 → 8 nilai, jadi ada yang menyusut (accepted+preparing).
+//  Status pesanan — kosakata BARU yang jadi acuan (docs/backend/ERD.md §4)
+//
+//  Peta di bawah hanya untuk MASUKAN: pemanggil lama yang masih mengirim status
+//  skema lama tetap diterjemahkan. Yang dikembalikan adapter SELALU status baru.
+//  UNRESOLVED OST-1: 9 -> 8 nilai, jadi ada yang menyusut (accepted+preparing).
 // ------------------------------------------------------------
 const LEGACY_TO_NEW = {
   pending: 'quotation',      // order masuk antrean merchant
@@ -50,20 +54,10 @@ const LEGACY_TO_NEW = {
   rejected: 'canceled',
   cancelled: 'canceled',
 };
-const NEW_TO_LEGACY = {
-  cart: 'pending',
-  quotation: 'pending',
-  prepare: 'preparing',
-  waitingCourier: 'ready',
-  waitingDelivery: 'picked_up',
-  delivery: 'on_the_way',
-  done: 'delivered',
-  canceled: 'cancelled',
-};
 const toNewStatus = (s) => LEGACY_TO_NEW[s] || s;
-const toLegacyStatus = (s) => NEW_TO_LEGACY[s] || s;
 
-// pembayaran: legacy 'cod' | 'transfer' | 'wallet' → skema baru
+// Pembayaran: masukan lama 'wallet' -> 'xendit_qris' (wallet bukan nilai yang
+// diizinkan check constraint orders.payment_method).
 const PAYMENT_TO_NEW = { cod: 'cod', transfer: 'transfer', wallet: 'xendit_qris' };
 
 // ------------------------------------------------------------
@@ -73,16 +67,11 @@ function mapMerchant(r) {
   return {
     id: r.id,
     name: r.store_name,
-    storeName: r.store_name,
     address: r.store_address || '',
-    storeAddress: r.store_address || '',
+    phone: r.store_phone || '',
     lat: r.latitude,
     lng: r.longitude,
-    // kolom emoji/category tidak ada di draft → lihat ERD §8 butir 4 (butuh keputusan)
-    emoji: '🍽️',
-    category: null,
     photo: r.photo || null,
-    open: r.available,
     available: r.available,
     deliveryConfig: r.delivery_config || {},
     tenantStatus: r.tenant_status,
@@ -97,12 +86,12 @@ function mapMenu(r, variants = []) {
     merchantId: r.merchant_id,
     name: r.name,
     description: r.description || '',
-    price: num(r.price_jod),          // legacy name (UI lama)
     priceJod: num(r.price_jod),
-    category: r.category || null,     // kolom legacy, lihat ERD §8 butir 4
-    stock: r.stock,                   // kolom legacy; null = stok tak dilacak
+    // stock & category = kolom warisan yang belum ada di draft; lihat ERD §8
+    // butir 4 (butuh keputusan). null = fitur tidak dipakai.
+    stock: r.stock,
+    category: r.category || null,
     image: r.image || null,
-    photo: r.photo || null,
     available: r.available,
     variants: variants.map(mapVariant),
   };
@@ -126,17 +115,16 @@ function mapVariant(v) {
 function mapCourier(r) {
   return {
     id: r.id,
+    userId: r.user_id,
     name: r.name,
-    phone: '',
-    vehicle: r.vehicle || null,
-    status: r.availability,
+    // Nomor kurir ada di `users.phone`, bukan di tabel `couriers` -> perlu embed.
+    phone: r.users?.phone || '',
+    merchantId: r.merchant_id,
     availability: r.availability,
     lat: r.latitude,
     lng: r.longitude,
     photo: r.photo || null,
-    merchantId: r.merchant_id,
-    // UI lama memakai boolean `online`; sekarang turunan dari availability
-    online: r.availability === 'available',
+    vehicle: r.vehicle || null,
     lastSeenAt: toMs(r.last_seen_at),
   };
 }
@@ -147,52 +135,40 @@ function mapOrder(r) {
   const cust = r.customers || {};
   const addr = r.addresses || {};
   const items = (r.order_items || []).map((it) => ({
-    // legacy
-    itemId: it.menu_id,
-    name: it.name,
-    price: num(it.unit_price_jod),
-    qty: it.qty,
-    note: it.note || '',
-    image: null,
-    photo: null,
-    // baru
     orderId: it.order_id,
     menuId: it.menu_id,
+    name: it.name,
+    qty: it.qty,
     unitPriceJod: num(it.unit_price_jod),
     modifiers: it.modifiers || [],
     lineTotalJod: num(it.line_total_jod),
+    note: it.note || '',
   }));
 
   return {
     id: r.id,
     code: r.code,
-    // status: legacy untuk UI, `statusNew` = kebenaran skema baru
-    status: toLegacyStatus(r.status),
-    statusNew: r.status,
+    status: r.status,
     createdAt: toMs(r.created_at),
     placedAt: toMs(r.placed_at),
-    statusTimestamps: {},
-    // pihak
+    // pihak — alamat diambil dari `delivery_address_id` (snapshot saat order)
     customerId: r.customer_id,
     customerName: cust.name || '',
-    customerAddress: addr.address || '',
-    customerLat: addr.latitude ?? null,
-    customerLng: addr.longitude ?? null,
-    restaurantId: r.merchant_id,
-    restaurantName: m.store_name || '',
-    restaurantLat: m.latitude ?? null,
-    restaurantLng: m.longitude ?? null,
-    restaurantPhoto: m.photo || null,
+    deliveryAddressId: r.delivery_address_id,
+    deliveryAddress: addr.address || '',
+    deliveryLat: addr.latitude ?? null,
+    deliveryLng: addr.longitude ?? null,
+    merchantId: r.merchant_id,
+    merchantName: m.store_name || '',
+    merchantLat: m.latitude ?? null,
+    merchantLng: m.longitude ?? null,
+    merchantPhoto: m.photo || null,
     courierId: r.courier_id,
     courierName: c.name || '',
     courierPhoto: c.photo || null,
     courierLat: c.latitude ?? null,
     courierLng: c.longitude ?? null,
-    remainingMeters: null,
-    // uang — legacy + baru
-    subtotal: num(r.sub_total_jod),
-    courierCost: num(r.delivery_fee_jod),
-    total: num(r.total_jod),
+    // uang — snapshot saat order dibuat (JOD = satuan ledger, IDR = settlement)
     subTotalJod: num(r.sub_total_jod),
     deliveryFeeJod: num(r.delivery_fee_jod),
     platformFeeJod: num(r.platform_fee_jod),
@@ -200,10 +176,10 @@ function mapOrder(r) {
     promoAmountJod: num(r.promo_amount_jod),
     totalJod: num(r.total_jod),
     totalIdr: r.total_idr === null ? null : num(r.total_idr),
+    zoneId: r.zone_id,
     zoneCode: r.zone_code,
     promoId: r.promo_id,
     // pembayaran & reserve
-    payment: r.payment_method,
     paymentMethod: r.payment_method,
     paymentStatus: r.payment_status,
     paidAt: toMs(r.paid_at),
@@ -212,7 +188,6 @@ function mapOrder(r) {
     cancelReason: r.cancel_reason,
     cancelBy: r.cancel_by,
     orderNote: r.order_note,
-    prepTimeMinutes: null,
     items,
   };
 }
@@ -288,6 +263,45 @@ async function ensureWallet(userId) {
   return created.id;
 }
 
+// `orders.delivery_address_id` NOT NULL, jadi order tidak bisa dibuat tanpa
+// alamat kirim. Urutan: id yang dikirim pemanggil -> alamat default customer ->
+// bikin alamat baru dari koordinat yang dikirim -> kalau semuanya kosong, gagal
+// dengan pesan yang jelas (daripada error constraint yang tidak informatif).
+async function resolveDeliveryAddress(order, me) {
+  if (order.deliveryAddressId) return order.deliveryAddressId;
+  if (me?.id) {
+    const { data } = await supabase
+      .from('addresses')
+      .select('id')
+      .eq('user_id', me.id)
+      .order('is_default', { ascending: false })
+      .order('id')
+      .limit(1)
+      .maybeSingle();
+    if (data) return data.id;
+  }
+  if (me?.id && order.deliveryAddress && order.deliveryLat != null && order.deliveryLng != null) {
+    const { data, error } = await supabase
+      .from('addresses')
+      .insert({
+        user_id: me.id,
+        label: order.deliveryLabel || 'Rumah',
+        address: order.deliveryAddress,
+        latitude: order.deliveryLat,
+        longitude: order.deliveryLng,
+        is_default: true,
+      })
+      .select('id')
+      .single();
+    if (error) throw error;
+    return data.id;
+  }
+  throw new Error(
+    'Order butuh alamat kirim. Kirim `deliveryAddressId`, atau `deliveryAddress` + ' +
+      '`deliveryLat` + `deliveryLng`, atau simpan alamat default customer lebih dulu.',
+  );
+}
+
 // ------------------------------------------------------------
 //  Seed (hanya bila tabel kosong) — data demo bersumber dari data/seed.js
 // ------------------------------------------------------------
@@ -328,7 +342,6 @@ async function ensureSeed() {
           description: m.description,
           price_jod: m.price,
           image: m.image || null,
-          photo: m.photo || null,
           available: m.available !== false,
           stock: m.stock ?? null,
           category: m.category || null,
@@ -518,6 +531,7 @@ export const irbidBackend = {
     const upd = {};
     if (patch.name !== undefined) upd.store_name = patch.name;
     if (patch.address !== undefined) upd.store_address = patch.address;
+    if (patch.phone !== undefined) upd.store_phone = patch.phone;  // E.164 ditegakkan check constraint
     if (patch.lat !== undefined) upd.latitude = patch.lat;
     if (patch.lng !== undefined) upd.longitude = patch.lng;
     if (patch.photo !== undefined) upd.photo = patch.photo;
@@ -591,7 +605,6 @@ export const irbidBackend = {
       price_jod: it.priceJod ?? it.price ?? 0,
       available: it.available !== false,
       image: it.image || null,
-      photo: it.photo || null,
       stock: it.stock ?? null,
       category: it.category || null,
     }));
@@ -619,7 +632,8 @@ export const irbidBackend = {
   // ---------------- Kurir ----------------
   async getCouriers() {
     await ensureSeed();
-    const { data, error } = await supabase.from('couriers').select('*').order('id');
+    // `users(phone)`: nomor kurir ada di tabel users, bukan di couriers.
+    const { data, error } = await supabase.from('couriers').select('*, users(phone)').order('id');
     if (error) throw error;
     return (data || []).map(mapCourier);
   },
@@ -627,6 +641,7 @@ export const irbidBackend = {
   async updateCourier(courierId, patch = {}) {
     const upd = {};
     if (patch.availability !== undefined) upd.availability = patch.availability;
+    // Toleransi masukan lama: boolean `online` -> availability.
     if (patch.online !== undefined) upd.availability = patch.online ? 'available' : 'unavailable';
     if (patch.name !== undefined) upd.name = patch.name;
     if (patch.vehicle !== undefined) upd.vehicle = patch.vehicle;
@@ -638,7 +653,7 @@ export const irbidBackend = {
       const { error } = await supabase.from('couriers').update(upd).eq('id', courierId);
       if (error) throw error;
     }
-    return mapCourier((await supabase.from('couriers').select('*').eq('id', courierId).single()).data);
+    return mapCourier((await supabase.from('couriers').select('*, users(phone)').eq('id', courierId).single()).data);
   },
 
   onCouriersChange(cb) {
@@ -655,37 +670,52 @@ export const irbidBackend = {
   async createOrder(order = {}) {
     const me = await this.getCurrentUser();
     const items = order.items || [];
+    if (!items.length) throw new Error('Order harus berisi minimal satu item.');
+
+    // Alamat kirim wajib (orders.delivery_address_id NOT NULL).
+    const deliveryAddressId = await resolveDeliveryAddress(order, me);
 
     // Snapshot harga: dibaca dari `menus` SEKARANG lalu disimpan permanen.
-    const menuIds = items.map((i) => i.itemId ?? i.menuId).filter(Boolean);
+    const menuIds = items.map((i) => i.menuId).filter(Boolean);
     const { data: menuRows } = await supabase.from('menus').select('*').in('id', menuIds);
     const byId = new Map((menuRows || []).map((m) => [m.id, m]));
+    // Harga TIDAK boleh datang dari pemanggil: kalau menu tidak ketemu, order
+    // dibatalkan. (Sebelumnya jatuh ke `i.price` kiriman klien -> harga bisa dipalsukan.)
+    for (const i of items) {
+      if (!i.menuId || !byId.get(i.menuId)) {
+        throw new Error(`Menu ${i.menuId ?? '(kosong)'} tidak ditemukan; order dibatalkan.`);
+      }
+    }
 
     const subTotal = items.reduce((s, i) => {
-      const m = byId.get(i.itemId ?? i.menuId);
-      const unit = m ? num(m.price_jod) : num(i.price);
-      const delta = (i.modifiers || []).reduce((d, mm) => d + num(mm.priceDelta), 0);
+      const unit = num(byId.get(i.menuId).price_jod);
+      const delta = (i.modifiers || []).reduce((d, mm) => d + num(mm.priceDeltaJod ?? mm.priceDelta), 0);
       return s + (unit + delta) * i.qty;
     }, 0);
 
-    const deliveryFee = num(order.courierCost ?? order.deliveryFeeJod);
+    const deliveryFee = num(order.deliveryFeeJod);
+    // customer_id & merchant_id NOT NULL -> gagalkan lebih awal dengan pesan jelas.
+    const customerId = order.customerId ?? me?.customerId ?? null;
+    if (!customerId) throw new Error('Order butuh customer: kirim `customerId` atau masuk sebagai customer.');
+    const merchantId = order.merchantId ?? null;
+    if (!merchantId) throw new Error('Order butuh `merchantId` (toko yang melayani).');
     const platformFee = num(order.platformFeeJod); // UNRESOLVED FEE-1 → dari pemanggil, bukan hardcode
     const tip = num(order.tipJod);
     const total = subTotal + deliveryFee + platformFee + tip;
 
     const row = {
       code: order.code || 'SA-' + Date.now(),
-      status: toNewStatus(order.status || 'pending'),
-      customer_id: order.customerId ?? me?.customerId ?? null,
-      merchant_id: order.restaurantId ?? order.merchantId ?? null,
-      delivery_address_id: order.deliveryAddressId ?? null,
+      status: toNewStatus(order.status || 'quotation'),
+      customer_id: customerId,
+      merchant_id: merchantId,
+      delivery_address_id: deliveryAddressId,
       sub_total_jod: subTotal,
       delivery_fee_jod: deliveryFee,
       platform_fee_jod: platformFee,
       tip_jod: tip,
       total_jod: total,
       zone_code: order.zoneCode ?? null,
-      payment_method: PAYMENT_TO_NEW[order.payment] || order.paymentMethod || 'cod',
+      payment_method: PAYMENT_TO_NEW[order.paymentMethod] || order.paymentMethod || 'cod',
       payment_status: 'unpaid',
       hold_status: 'none',
       order_note: order.orderNote ?? null,
@@ -697,19 +727,19 @@ export const irbidBackend = {
 
     if (items.length) {
       const itemRows = items.map((i) => {
-        const m = byId.get(i.itemId ?? i.menuId);
-        const unit = m ? num(m.price_jod) : num(i.price);
+        const m = byId.get(i.menuId);
+        const unit = num(m.price_jod);
         const modifiers = (i.modifiers || []).map((mm) => ({
           variantId: mm.variantId ?? null,
           optionId: mm.optionId ?? null,
           name: mm.name ?? '',
-          priceDeltaJod: num(mm.priceDelta),
+          priceDeltaJod: num(mm.priceDeltaJod ?? mm.priceDelta),
         }));
         const delta = modifiers.reduce((d, mm) => d + num(mm.priceDeltaJod), 0);
         return {
           order_id: created.id,
-          menu_id: i.itemId ?? i.menuId,
-          name: m ? m.name : i.name,        // snapshot nama
+          menu_id: i.menuId,
+          name: m.name,                     // snapshot nama
           qty: i.qty,
           unit_price_jod: unit,             // snapshot harga
           modifiers,
@@ -720,7 +750,7 @@ export const irbidBackend = {
       const { error: iErr } = await supabase.from('order_items').insert(itemRows);
       if (iErr) throw iErr;
       // Stok turun (kolom legacy menus.stock; null = tidak dilacak)
-      for (const i of items) await this.updateStock(i.itemId ?? i.menuId, -i.qty);
+      for (const i of items) await this.updateStock(i.menuId, -i.qty);
     }
 
     return this.getOrder(created.id);
@@ -815,7 +845,13 @@ export const irbidBackend = {
       chat = data;
     }
     if (userId) {
-      await supabase.from('chat_participants').upsert({ chat_id: chat.id, user_id: userId }, { onConflict: 'chat_id,user_id' });
+      // `chat_participants.role` NOT NULL tanpa default -> ambil peran yang
+      // sebenarnya dari `users`, jangan menebak.
+      const { data: u } = await supabase.from('users').select('role').eq('id', userId).maybeSingle();
+      if (!u) throw new Error('Tidak bisa menambahkan peserta chat: user tidak ditemukan.');
+      await supabase
+        .from('chat_participants')
+        .upsert({ chat_id: chat.id, user_id: userId, role: u.role }, { onConflict: 'chat_id,user_id' });
     }
     return chat;
   },
@@ -834,12 +870,14 @@ export const irbidBackend = {
 
   async sendMessage(orderId, msg = {}) {
     const me = await this.getCurrentUser();
-    const chat = await this.ensureChat(orderId, me?.id);
+    // `chat_messages.sender_id` NOT NULL -> tanpa sesi, pesan tidak bisa dikirim.
+    if (!me) throw new Error('Harus masuk dulu untuk mengirim pesan.');
+    const chat = await this.ensureChat(orderId, me.id);
     const { data, error } = await supabase
       .from('chat_messages')
       .insert({
         chat_id: chat.id,
-        sender_id: me?.id ?? null,
+        sender_id: me.id,
         channel: msg.channel || 'customer-merchant',
         body: msg.text || msg.body || '',
       })
